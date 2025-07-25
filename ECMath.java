@@ -126,6 +126,18 @@ public class ECMath {
             ISOException.throwIt(SW_INVALID_POINT_FORMAT);
         }
         
+        // Check private key is not zero
+        boolean isZero = true;
+        for (short i = 0; i < COORD_SIZE; i++) {
+            if (privateKeyS[(short)(privateKeyOffset + i)] != 0) {
+                isZero = false;
+                break;
+            }
+        }
+        if (isZero) {
+            ISOException.throwIt(SW_INVALID_KEY_LENGTH);
+        }
+        
         // Extract public key coordinates
         Util.arrayCopy(publicKeyPoint, (short)(publicKeyOffset + 1), 
                       pointX1, (short)1, COORD_SIZE);
@@ -209,9 +221,11 @@ public class ECMath {
         modAdd(tmp2, tmp1, tmp2);
         modAdd(tmp2, tmp1, tmp2);
         
-        // tmp2 = 3*x1^2 + a (a = -3 for P-256)
-        copyBignat(tmp2, tmp3);
-        modSub(tmp3, copyToRSASize(new byte[]{3}), tmp2);
+        // tmp2 = 3*x1^2 + a (where a = P256_A = p-3)
+        // Since P256_A is already in RSA size format in modP initialization
+        byte[] aValue = new byte[RSA_BLOCK_SIZE];
+        prependZeros(P256_A, (short)0, COORD_SIZE, aValue, (short)0, RSA_BLOCK_SIZE);
+        modAdd(tmp2, aValue, tmp2);
         
         // tmp3 = 2*y1
         modAdd(y1, y1, tmp3);
@@ -308,12 +322,20 @@ public class ECMath {
         // result = ((a+b)^3 - (a-b)^3) / 24
         modSub(tmp4, tmp3, tmp5);
         
-        // Divide by 24 = 8 * 3
-        divideBy8(tmp5);
-        divideBy3(tmp5);
+        // Divide by 24 in modular arithmetic
+        // First compute 24^(-1) mod p
+        byte[] twentyFour = new byte[RSA_BLOCK_SIZE];
+        twentyFour[RSA_BLOCK_SIZE - 1] = 24;
         
-        // Reduce modulo P
-        mod(tmp5, result);
+        // Compute p-2 for modular inverse
+        copyBignat(modP, tmp3);
+        tmp3[RSA_BLOCK_SIZE - 1] -= 2;
+        
+        // 24^(-1) = 24^(p-2) mod p
+        modExp(twentyFour, tmp3, tmp4);
+        
+        // result = tmp5 * 24^(-1) mod p
+        modMul(tmp5, tmp4, result);
     }
     
     /**
@@ -535,39 +557,7 @@ public class ECMath {
         return tmp6;
     }
     
-    private void divideBy8(byte[] a) {
-        // Shift right by 3 bits
-        byte carry = 0;
-        for (short i = 0; i < RSA_BLOCK_SIZE; i++) {
-            byte newCarry = (byte)(a[i] & 0x07);
-            a[i] = (byte)((a[i] >> 3) | (carry << 5));
-            carry = newCarry;
-        }
-    }
-    
-    private void divideBy3(byte[] a) {
-        // Simple division by repeated subtraction
-        // This is slow but works for small divisors
-        Util.arrayFillNonAtomic(tmp4, (short)0, RSA_BLOCK_SIZE, (byte)0);
-        
-        while (!isZero(a)) {
-            // Subtract 3 until we can't
-            byte[] three = copyToRSASize(new byte[]{3});
-            if (compare(a, three) >= 0) {
-                subtract(a, three, a);
-                // Increment result
-                short carry = 1;
-                for (short i = (short)(RSA_BLOCK_SIZE - 1); i >= 0 && carry != 0; i--) {
-                    short sum = (short)((tmp4[i] & 0xFF) + carry);
-                    tmp4[i] = (byte)sum;
-                    carry = (short)(sum >> 8);
-                }
-            } else {
-                break;
-            }
-        }
-        copyBignat(tmp4, a);
-    }
+
     
     /**
      * Clear all temporary data
