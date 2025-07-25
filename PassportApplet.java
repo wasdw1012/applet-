@@ -563,8 +563,7 @@ public class PassportApplet extends Applet implements ISO7816 {
             // Derive session keys using KDF (ICAO 9303 Part 11)
             deriveSessionKeysFromCA(sharedSecret, (short)0, secretLen);
             
-            // Reset SSC for new session
-            crypto.resetSSC();
+            // SSC will be reset when new secure messaging session starts
             
         } catch (ISOException e) {
             // Clear sensitive data on error
@@ -621,7 +620,7 @@ public class PassportApplet extends Applet implements ISO7816 {
         Util.arrayCopy(hashOutput, (short)0, keyMaterial, (short)16, (short)16);
         
         // Set both keys: K_mac at offset 16, K_enc at offset 0
-        keys.setSecureMessagingKeys(keyMaterial, (short)16, keyMaterial, (short)0);
+        keyStore.setSecureMessagingKeys(keyMaterial, (short)16, keyMaterial, (short)0);
         
         // Clear sensitive data
         Util.arrayFillNonAtomic(kdfInput, (short)0, (short)kdfInput.length, (byte)0);
