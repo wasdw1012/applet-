@@ -13,14 +13,16 @@ pip install pyasn1-modules
 
 ## 文件准备
 
-在运行脚本之前，请确保以下文件都在脚本所在目录中：
+脚本会自动搜索当前目录中具有特定后缀的文件。请确保以下文件都在脚本所在目录中：
 
-1. **csca_cert.der** - CSCA锚证书（DER格式）
-2. **dsc_cert.der** - DSC文档签名证书（DER格式）
-3. **dg14.bin** - DG14数据（二进制格式）
-4. **dg15.bin** - DG15数据（二进制格式）
-5. **aa_private.der** - AA私钥（DER格式）
-6. **ca_s_value.bin** - CA私钥S值（二进制格式）
+1. **CSCA证书** - 文件后缀为 `_cert.der`，文件名包含'csca'（如：csca_cert.der）
+2. **DSC证书** - 文件后缀为 `_cert.der`，文件名不包含'csca'（如：dsc_cert.der）
+3. **DG14数据** - 文件后缀为 `dg14.bin`（如：passport_dg14.bin）
+4. **DG15数据** - 文件后缀为 `dg15.bin`（如：passport_dg15.bin）
+5. **AA私钥** - 文件后缀为 `_private.der`（如：aa_private.der）
+6. **CA私钥S值** - 文件后缀为 `_s_value.bin`（如：ca_s_value.bin）
+
+**注意**：文件名前缀可以是任意的，脚本会根据后缀自动识别文件类型。
 
 ## 运行脚本
 

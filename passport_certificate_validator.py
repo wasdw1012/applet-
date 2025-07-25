@@ -26,15 +26,18 @@ import binascii
 class PassportCertificateValidator:
     """护照证书链验证器"""
     
-    # 硬编码文件路径
-    FILE_PATHS = {
-        'csca_cert': 'csca_cert.der',
-        'dsc_cert': 'dsc_cert.der',
+    # 文件后缀映射
+    FILE_SUFFIXES = {
+        'csca_cert': '_cert.der',  # CSCA证书后缀
+        'dsc_cert': '_cert.der',   # DSC证书后缀 
         'dg14': 'dg14.bin',
         'dg15': 'dg15.bin',
-        'aa_private': 'aa_private.der',
-        'ca_s_value': 'ca_s_value.bin'
+        'aa_private': '_private.der',
+        'ca_s_value': '_s_value.bin'
     }
+    
+    # 动态查找的文件路径
+    FILE_PATHS = {}
     
     # OpenSSL路径
     OPENSSL_PATH = r"C:\Program Files\OpenSSL-Win64\bin\openssl.exe"
@@ -78,6 +81,47 @@ class PassportCertificateValidator:
         self.trust_chain = {}
         self.report_lines = []
         self.start_time = datetime.datetime.now()
+        self._find_files()
+        
+    def _find_files(self):
+        """自动搜索具有指定后缀的文件"""
+        print("正在搜索文件...")
+        current_dir = os.getcwd()
+        files = os.listdir(current_dir)
+        
+        # 查找DG14和DG15文件
+        for file in files:
+            if file.endswith('dg14.bin'):
+                self.FILE_PATHS['dg14'] = file
+                print(f"找到DG14文件: {file}")
+            elif file.endswith('dg15.bin'):
+                self.FILE_PATHS['dg15'] = file
+                print(f"找到DG15文件: {file}")
+        
+        # 查找证书文件（需要区分CSCA和DSC）
+        cert_files = [f for f in files if f.endswith('_cert.der')]
+        for cert_file in cert_files:
+            # 简单规则：文件名包含csca的是CSCA证书，其他是DSC证书
+            if 'csca' in cert_file.lower():
+                self.FILE_PATHS['csca_cert'] = cert_file
+                print(f"找到CSCA证书: {cert_file}")
+            else:
+                self.FILE_PATHS['dsc_cert'] = cert_file
+                print(f"找到DSC证书: {cert_file}")
+        
+        # 查找私钥文件
+        private_files = [f for f in files if f.endswith('_private.der')]
+        if private_files:
+            self.FILE_PATHS['aa_private'] = private_files[0]
+            print(f"找到AA私钥: {private_files[0]}")
+        
+        # 查找S值文件
+        s_value_files = [f for f in files if f.endswith('_s_value.bin')]
+        if s_value_files:
+            self.FILE_PATHS['ca_s_value'] = s_value_files[0]
+            print(f"找到CA S值: {s_value_files[0]}")
+        
+        print("")
         
     def log(self, message: str, level: str = "INFO"):
         """记录日志"""
@@ -928,17 +972,27 @@ class PassportCertificateValidator:
         print("开始护照证书链验证...")
         print("")
         
-        # 检查所有文件是否存在
+        # 检查是否找到所有必需文件
+        required_files = ['csca_cert', 'dsc_cert', 'dg14', 'dg15', 'aa_private', 'ca_s_value']
         missing_files = []
-        for name, path in self.FILE_PATHS.items():
-            if not os.path.exists(path):
-                missing_files.append(f"{name}: {path}")
+        
+        for name in required_files:
+            if name not in self.FILE_PATHS:
+                suffix = self.FILE_SUFFIXES.get(name, '')
+                missing_files.append(f"{name}: 未找到后缀为 {suffix} 的文件")
                 
         if missing_files:
-            print("错误: 以下文件不存在:")
+            print("错误: 以下文件未找到:")
             for f in missing_files:
                 print(f"  - {f}")
             print("\n请确保所有必需文件都在当前目录中。")
+            print("\n期望的文件后缀:")
+            print("  - CSCA证书: *_cert.der (文件名包含'csca')")
+            print("  - DSC证书: *_cert.der (文件名不包含'csca')")
+            print("  - DG14: *dg14.bin")
+            print("  - DG15: *dg15.bin")
+            print("  - AA私钥: *_private.der")
+            print("  - CA S值: *_s_value.bin")
             return
             
         # 执行验证
