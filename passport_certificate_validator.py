@@ -243,7 +243,7 @@ class PassportCertificateValidator:
                 self.trust_chain['csca_ski'] = ski.value.digest
                 
             # 验证有效期
-            now = datetime.datetime.utcnow()  # 返回 naive UTC 时间
+            now = datetime.datetime.now(datetime.timezone.utc)  # 返回 timezone-aware UTC 时间
             if now < cert.not_valid_before:
                 result['errors'].append("证书尚未生效")
                 self.log("证书尚未生效", "ERROR")
@@ -663,8 +663,8 @@ class PassportCertificateValidator:
                     self.log("⚠ 未检测到标准的Application[15]标签", "WARNING")
                 
                 if not has_spki:
-                    result['errors'].append("未找到有效的SubjectPublicKeyInfo结构")
-                    self.log("✗ 未找到有效的SubjectPublicKeyInfo结构", "ERROR")
+                    result['warnings'].append("ASN.1输出中未找到SubjectPublicKeyInfo标识")
+                    self.log("⚠ ASN.1输出中未找到SubjectPublicKeyInfo标识", "WARNING")
             else:
                 result['errors'].append(f"OpenSSL ASN.1解析失败: {error}")
             
@@ -1023,14 +1023,29 @@ class PassportCertificateValidator:
         self.log("\n[1] 组件完整性检查")
         required_components = ['csca', 'dsc', 'dg14', 'dg15', 'aa_keypair']
         missing = []
+        failed = []
         
         for component in required_components:
-            if component not in self.validation_results or not self.validation_results[component]['valid']:
+            if component not in self.validation_results:
                 missing.append(component)
+            elif not self.validation_results[component]['valid']:
+                # 检查是否只有警告没有错误
+                component_result = self.validation_results[component]
+                if 'errors' in component_result and len(component_result['errors']) > 0:
+                    failed.append(component)
+                else:
+                    # 只有警告，不算失败
+                    self.log(f"⚠ {component} 有警告但无错误，继续验证", "WARNING")
                 
         if missing:
             result['errors'].append(f"信任链缺失组件: {', '.join(missing)}")
             self.log(f"✗ 信任链缺失组件: {', '.join(missing)}", "ERROR")
+            result['valid'] = False
+            return result
+            
+        if failed:
+            result['errors'].append(f"信任链组件验证失败: {', '.join(failed)}")
+            self.log(f"✗ 信任链组件验证失败: {', '.join(failed)}", "ERROR")
             result['valid'] = False
             return result
         
@@ -1204,7 +1219,7 @@ class PassportCertificateValidator:
         # Step 4: 验证时间有效性
         self.log("\n[4] 时间有效性验证")
         
-        now = datetime.datetime.now()
+        now = datetime.datetime.now(datetime.timezone.utc)
         csca_cert = self.trust_chain.get('csca_cert')
         dsc_cert = self.trust_chain.get('dsc_cert')
         
