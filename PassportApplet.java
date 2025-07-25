@@ -563,12 +563,74 @@ public class PassportApplet extends Applet implements ISO7816 {
             // TODO: Derive session keys from shared secret
             // TODO: Initialize new secure messaging with derived keys
             
+            // Derive session keys using KDF (ICAO 9303 Part 11)
+            deriveSessionKeysFromCA(sharedSecret, (short)0, secretLen);
+            
+            // Reset SSC for new session
+            crypto.resetSSC();
+            
         } catch (ISOException e) {
             // Clear sensitive data on error
             ecMath.clear();
             Util.arrayFillNonAtomic(sharedSecret, (short)0, (short)sharedSecret.length, (byte)0);
             throw e;
         }
+    }
+
+    /**
+     * Derive session keys from CA shared secret using KDF
+     * According to ICAO 9303 Part 11, Section 4.4.5
+     * 
+     * @param sharedSecret the ECDH shared secret (x-coordinate)
+     * @param offset offset in sharedSecret
+     * @param length length of shared secret
+     */
+    private void deriveSessionKeysFromCA(byte[] sharedSecret, short offset, short length) {
+        // KDF input: sharedSecret || counter
+        // counter is 4 bytes: 0x00000001 for K_enc, 0x00000002 for K_mac
+        
+        byte[] kdfInput = new byte[(short)(length + 4)];
+        byte[] hashOutput = new byte[32]; // SHA-256 output
+        
+        // Copy shared secret to KDF input
+        Util.arrayCopy(sharedSecret, offset, kdfInput, (short)0, length);
+        
+        // Set counter bytes position
+        kdfInput[length] = (byte)0x00;
+        kdfInput[(short)(length + 1)] = (byte)0x00;
+        kdfInput[(short)(length + 2)] = (byte)0x00;
+        
+        // For 3DES keys, we need:
+        // - K_enc: 16 bytes (112-bit 3DES key)
+        // - K_mac: 16 bytes (112-bit 3DES key)
+        
+        // Temporary storage for both keys
+        byte[] keyMaterial = new byte[32];
+        
+        // First derive encryption key with counter = 1
+        kdfInput[(short)(length + 3)] = (byte)0x01;
+        crypto.shaDigest.reset();
+        crypto.shaDigest.doFinal(kdfInput, (short)0, (short)(length + 4), hashOutput, (short)0);
+        
+        // Take first 16 bytes for K_enc
+        Util.arrayCopy(hashOutput, (short)0, keyMaterial, (short)0, (short)16);
+        
+        // Now derive MAC key with counter = 2
+        kdfInput[(short)(length + 3)] = (byte)0x02;
+        crypto.shaDigest.reset();
+        crypto.shaDigest.doFinal(kdfInput, (short)0, (short)(length + 4), hashOutput, (short)0);
+        
+        // Take first 16 bytes for K_mac
+        Util.arrayCopy(hashOutput, (short)0, keyMaterial, (short)16, (short)16);
+        
+        // Set both keys: K_mac at offset 16, K_enc at offset 0
+        keys.setSecureMessagingKeys(keyMaterial, (short)16, keyMaterial, (short)0);
+        
+        // Clear sensitive data
+        Util.arrayFillNonAtomic(kdfInput, (short)0, (short)kdfInput.length, (byte)0);
+        Util.arrayFillNonAtomic(hashOutput, (short)0, (short)hashOutput.length, (byte)0);
+        Util.arrayFillNonAtomic(keyMaterial, (short)0, (short)keyMaterial.length, (byte)0);
+        Util.arrayFillNonAtomic(sharedSecret, (short)0, (short)sharedSecret.length, (byte)0);
     }
 
     /**
