@@ -61,6 +61,8 @@ public class PassportApplet extends Applet implements ISO7816 {
     static final byte CHIP_AUTHENTICATED = 0x10;
 
     static final byte TERMINAL_AUTHENTICATED = 0x20;
+    
+    static final byte CA_INITIALIZED = 0x40; // CA initialized, waiting for GA command
 
     /* values for persistent state */
     static final byte HAS_MUTUALAUTHENTICATION_KEYS = 1;
@@ -85,6 +87,8 @@ public class PassportApplet extends Applet implements ISO7816 {
     static final byte CLA_PROTECTED_APDU = 0x0c;
 
     static final byte INS_INTERNAL_AUTHENTICATE = (byte) 0x88;
+    
+    static final byte INS_GENERAL_AUTHENTICATE = (byte) 0x86; // For Chip Authentication
 
     /* for EAC */
     static final byte INS_PSO = (byte) 0x2A;
@@ -149,6 +153,8 @@ public class PassportApplet extends Applet implements ISO7816 {
     private ECMath ecMath;
     private byte[] caPrivateKeyS;  // CA private key S value (32 bytes for P-256)
     private byte[] terminalEphemeralPublicKey;  // Terminal's ephemeral public key (65 bytes)
+    private byte[] chipEphemeralPrivateKeyS;  // Chip's ephemeral private key (32 bytes)
+    private byte[] chipEphemeralPublicKey;  // Chip's ephemeral public key (65 bytes)
     private byte[] sharedSecret;  // ECDH shared secret (32 bytes)
 
     private FileSystem fileSystem;
@@ -210,6 +216,8 @@ public class PassportApplet extends Applet implements ISO7816 {
         ecMath = new ECMath();
         caPrivateKeyS = new byte[32];  // P-256 uses 32 bytes
         terminalEphemeralPublicKey = JCSystem.makeTransientByteArray((short)65, JCSystem.CLEAR_ON_DESELECT);
+        chipEphemeralPrivateKeyS = JCSystem.makeTransientByteArray((short)32, JCSystem.CLEAR_ON_DESELECT);
+        chipEphemeralPublicKey = JCSystem.makeTransientByteArray((short)65, JCSystem.CLEAR_ON_DESELECT);
         sharedSecret = JCSystem.makeTransientByteArray((short)32, JCSystem.CLEAR_ON_DESELECT);
     }
 
@@ -322,6 +330,9 @@ public class PassportApplet extends Applet implements ISO7816 {
             break;
       case INS_INTERNAL_AUTHENTICATE:
             responseLength = processInternalAuthenticate(apdu, protectedApdu);
+            break;
+        case INS_GENERAL_AUTHENTICATE:
+            responseLength = processGeneralAuthenticate(apdu, protectedApdu);
             break;
         case INS_SELECT_FILE:
             processSelectFile(apdu);
@@ -495,33 +506,24 @@ public class PassportApplet extends Applet implements ISO7816 {
     
     /**
      * Process MSE (Manage Security Environment) command
-     * Handles MSE:Set KAT for CA key agreement
+     * For CA: receives terminal's ephemeral public key and prepares for key agreement
      */
     private void processMSE(APDU apdu, boolean protectedApdu) {
         byte[] buffer = apdu.getBuffer();
         byte p1 = buffer[OFFSET_P1];
         byte p2 = buffer[OFFSET_P2];
         
-        // Check for MSE:Set KAT (Key Agreement Template)
-        if (p1 == P1_SETFORCOMPUTATION && p2 == P2_KAT) {
-            processMSESetKAT(apdu);
-        } else {
+        // Only handle MSE:Set KAT (Key Agreement Template)
+        if (p1 != P1_SETFORCOMPUTATION || p2 != P2_KAT) {
             ISOException.throwIt(SW_INCORRECT_P1P2);
         }
-    }
-    
-    /**
-     * Process MSE:Set KAT - receive terminal's ephemeral public key
-     */
-    private void processMSESetKAT(APDU apdu) {
-        byte[] buffer = apdu.getBuffer();
         
-        // Check CA is initialized
+        // 1. Security check: chip must have pre-loaded static CA key
         if ((persistentState & HAS_EC_KEY) == 0) {
             ISOException.throwIt(SW_CONDITIONS_NOT_SATISFIED);
         }
         
-        // Receive data
+        // 2. Parse and store terminal's ephemeral public key
         short lc = (short)(buffer[OFFSET_LC] & 0xFF);
         short offset = OFFSET_CDATA;
         
@@ -546,33 +548,64 @@ public class PassportApplet extends Applet implements ISO7816 {
         // Store terminal's ephemeral public key
         Util.arrayCopy(buffer, offset, terminalEphemeralPublicKey, (short)0, keyLen);
         
-        // Perform ECDH key agreement
-        try {
-            short secretLen = ecMath.performECDH(
-                caPrivateKeyS, (short)0,
-                terminalEphemeralPublicKey, (short)0,
-                sharedSecret, (short)0
-            );
-            
-            // Mark CA as performed
-            volatileState[0] |= CHIP_AUTHENTICATED;
-            
-            // Clear sensitive data
-            ecMath.clear();
-            
-            // TODO: Derive session keys from shared secret
-            // TODO: Initialize new secure messaging with derived keys
-            
-            // Derive session keys using KDF (ICAO 9303 Part 11)
-            deriveSessionKeysFromCA(sharedSecret, (short)0, secretLen);
-            
-            
-        } catch (ISOException e) {
-            // Clear sensitive data on error
-            ecMath.clear();
-            Util.arrayFillNonAtomic(sharedSecret, (short)0, (short)sharedSecret.length, (byte)0);
-            throw e;
+        // 3. Set state flag and done!
+        // Tell the system we're ready for the next step
+        volatileState[0] |= CA_INITIALIZED;
+        
+        // Note: No ECDH performed here, no CHIP_AUTHENTICATED set
+    }
+    
+    /**
+     * Process GENERAL AUTHENTICATE command for Chip Authentication
+     * This is the core of CA protocol: exchange public keys and establish secure channel
+     */
+    private short processGeneralAuthenticate(APDU apdu, boolean protectedApdu) {
+        // 1. Check state: MSE must have been performed
+        if ((volatileState[0] & CA_INITIALIZED) == 0) {
+            ISOException.throwIt(SW_SECURITY_STATUS_NOT_SATISFIED);
         }
+        
+        // --- Chip's action: generate and present its key ---
+        // 2. Generate chip's ephemeral private key
+        ecMath.generateRandomScalar(chipEphemeralPrivateKeyS, (short)0, (short)32);
+        
+        // 3. Calculate chip's ephemeral public key
+        ecMath.generatePublicKey(chipEphemeralPrivateKeyS, (short)0, chipEphemeralPublicKey, (short)0);
+        
+        // 4. Send chip's public key back to terminal! This is the critical step.
+        byte[] buffer = apdu.getBuffer();
+        short le = apdu.setOutgoing();
+        if (le < 65) {
+            ISOException.throwIt(SW_WRONG_LENGTH);
+        }
+        apdu.setOutgoingLength((short)65);
+        apdu.sendBytesLong(chipEphemeralPublicKey, (short)0, (short)65);
+        
+        // --- Behind the scenes: complete cryptographic calculations after response sent ---
+        // 5. Perform ECDH key agreement
+        // Using "chip's ephemeral private key" and "previously received terminal public key"
+        short secretLen = ecMath.performECDH(
+            chipEphemeralPrivateKeyS, (short)0,
+            terminalEphemeralPublicKey, (short)0,
+            sharedSecret, (short)0
+        );
+        
+        // 6. Derive session keys
+        deriveSessionKeysFromCA(sharedSecret, (short)0, secretLen);
+        
+        // 7. Clean up and update final state
+        // Clear intermediate state
+        volatileState[0] &= ~CA_INITIALIZED;
+        // Set final "chip authenticated" state
+        volatileState[0] |= CHIP_AUTHENTICATED;
+        
+        // Clear used ephemeral keys for forward secrecy
+        Util.arrayFillNonAtomic(chipEphemeralPrivateKeyS, (short)0, (short)32, (byte)0);
+        Util.arrayFillNonAtomic(chipEphemeralPublicKey, (short)0, (short)65, (byte)0);
+        ecMath.clear();
+        
+        // Response already sent via apdu.sendBytesLong(), return 0
+        return (short)0;
     }
 
     /**
