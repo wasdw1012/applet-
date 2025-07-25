@@ -395,10 +395,10 @@ class PassportCertificateValidator:
             
             # Step 1: 使用OpenSSL解析ASN.1结构
             self.log("\n[1] OpenSSL ASN.1结构分析")
-            asn1_result = self.run_openssl_command(['asn1parse', '-inform', 'DER', '-in', dg14_path])
+            success, output, error = self.run_openssl_command(['asn1parse', '-inform', 'DER', '-in', dg14_path])
             
-            if asn1_result['success']:
-                asn1_lines = asn1_result['output'].strip().split('\n')
+            if success:
+                asn1_lines = output.strip().split('\n')
                 result['details']['asn1_structure'] = []
                 
                 # 分析ASN.1结构
@@ -426,7 +426,7 @@ class PassportCertificateValidator:
                     result['warnings'].append("未检测到SET结构")
                     self.log("⚠ 未检测到SET结构", "WARNING")
             else:
-                result['errors'].append(f"OpenSSL ASN.1解析失败: {asn1_result['error']}")
+                result['errors'].append(f"OpenSSL ASN.1解析失败: {error}")
             
             # Step 2: 解析SecurityInfos
             self.log("\n[2] SecurityInfos解析")
@@ -630,10 +630,10 @@ class PassportCertificateValidator:
             
             # Step 1: 使用OpenSSL解析ASN.1结构
             self.log("\n[1] OpenSSL ASN.1结构分析")
-            asn1_result = self.run_openssl_command(['asn1parse', '-inform', 'DER', '-in', dg15_path])
+            success, output, error = self.run_openssl_command(['asn1parse', '-inform', 'DER', '-in', dg15_path])
             
-            if asn1_result['success']:
-                asn1_lines = asn1_result['output'].strip().split('\n')
+            if success:
+                asn1_lines = output.strip().split('\n')
                 result['details']['asn1_structure'] = []
                 
                 # 分析ASN.1结构
@@ -666,7 +666,7 @@ class PassportCertificateValidator:
                     result['errors'].append("未找到有效的SubjectPublicKeyInfo结构")
                     self.log("✗ 未找到有效的SubjectPublicKeyInfo结构", "ERROR")
             else:
-                result['errors'].append(f"OpenSSL ASN.1解析失败: {asn1_result['error']}")
+                result['errors'].append(f"OpenSSL ASN.1解析失败: {error}")
             
             # Step 2: 提取并验证公钥
             self.log("\n[2] 公钥提取和验证")
@@ -710,14 +710,14 @@ class PassportCertificateValidator:
                 
                 try:
                     # 使用OpenSSL解析公钥
-                    pubkey_result = self.run_openssl_command(['rsa', '-pubin', '-inform', 'DER', '-in', tmp_path, '-text', '-noout'])
+                    success, output, error = self.run_openssl_command(['rsa', '-pubin', '-inform', 'DER', '-in', tmp_path, '-text', '-noout'])
                     
-                    if pubkey_result['success']:
+                    if success:
                         self.log("✓ OpenSSL成功解析RSA公钥")
                         result['details']['key_type'] = 'RSA'
                         
                         # 解析OpenSSL输出
-                        output_lines = pubkey_result['output'].split('\n')
+                        output_lines = output.split('\n')
                         for line in output_lines:
                             if 'Public-Key:' in line:
                                 # 提取密钥长度
@@ -742,8 +742,8 @@ class PassportCertificateValidator:
                                     self.log(f"公钥指数: {result['details']['exponent']}")
                     else:
                         # 可能是EC密钥，尝试EC解析
-                        ec_result = self.run_openssl_command(['ec', '-pubin', '-inform', 'DER', '-in', tmp_path, '-text', '-noout'])
-                        if ec_result['success']:
+                        ec_success, ec_output, ec_error = self.run_openssl_command(['ec', '-pubin', '-inform', 'DER', '-in', tmp_path, '-text', '-noout'])
+                        if ec_success:
                             self.log("✓ OpenSSL成功解析EC公钥")
                             result['details']['key_type'] = 'EC'
                             # 解析EC参数...
@@ -1044,11 +1044,11 @@ class PassportCertificateValidator:
         
         # 2.1 验证CSCA自签名
         self.log("\n[2.1] CSCA自签名验证")
-        csca_self_verify = self.run_openssl_command([
+        success, output, error = self.run_openssl_command([
             'verify', '-CAfile', csca_path, csca_path
         ])
         
-        if csca_self_verify['success'] and 'OK' in csca_self_verify['output']:
+        if success and 'OK' in output:
             self.log("✓ CSCA自签名验证通过")
         else:
             result['errors'].append("CSCA自签名验证失败")
@@ -1056,11 +1056,11 @@ class PassportCertificateValidator:
         
         # 2.2 验证DSC由CSCA签发
         self.log("\n[2.2] DSC证书链验证")
-        dsc_verify = self.run_openssl_command([
+        dsc_success, dsc_output, dsc_error = self.run_openssl_command([
             'verify', '-CAfile', csca_path, dsc_path
         ])
         
-        if dsc_verify['success'] and 'OK' in dsc_verify['output']:
+        if dsc_success and 'OK' in dsc_output:
             self.log("✓ DSC由CSCA签发验证通过")
         else:
             result['errors'].append("DSC证书链验证失败")
@@ -1076,15 +1076,15 @@ class PassportCertificateValidator:
             dsc_result = self.validation_results['dsc']
             if 'authority_key_identifier' in dsc_result['details']:
                 # 使用OpenSSL提取并比较SKI/AKI
-                csca_text = self.run_openssl_command(['x509', '-in', csca_path, '-text', '-noout'])
-                dsc_text = self.run_openssl_command(['x509', '-in', dsc_path, '-text', '-noout'])
+                csca_success, csca_output, csca_error = self.run_openssl_command(['x509', '-in', csca_path, '-text', '-noout'])
+                dsc_text_success, dsc_text_output, dsc_text_error = self.run_openssl_command(['x509', '-in', dsc_path, '-text', '-noout'])
                 
                 ski_match = False
-                if csca_text['success'] and dsc_text['success']:
+                if csca_success and dsc_text_success:
                     # 提取SKI和AKI进行比较
                     import re
-                    csca_ski_match = re.search(r'Subject Key Identifier:\s*([A-F0-9:]+)', csca_text['output'], re.I)
-                    dsc_aki_match = re.search(r'Authority Key Identifier:\s*(?:keyid:)?([A-F0-9:]+)', dsc_text['output'], re.I)
+                    csca_ski_match = re.search(r'Subject Key Identifier:\s*([A-F0-9:]+)', csca_output, re.I)
+                    dsc_aki_match = re.search(r'Authority Key Identifier:\s*(?:keyid:)?([A-F0-9:]+)', dsc_text_output, re.I)
                     
                     if csca_ski_match and dsc_aki_match:
                         csca_ski = csca_ski_match.group(1).replace(':', '').lower()
@@ -1100,8 +1100,8 @@ class PassportCertificateValidator:
                     'from': 'CSCA',
                     'to': 'DSC',
                     'type': '签发',
-                    'verified': ski_match and dsc_verify['success'],
-                    'details': 'OpenSSL验证通过' if dsc_verify['success'] else 'OpenSSL验证失败'
+                    'verified': ski_match and dsc_success,
+                    'details': 'OpenSSL验证通过' if dsc_success else 'OpenSSL验证失败'
                 })
         
         # 3.2 DSC -> DG14/DG15 保护关系
