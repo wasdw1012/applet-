@@ -188,7 +188,7 @@ public class ECMath {
                     pointDouble(resultX, resultY, resultX, resultY);
                 }
                 
-                if ((b & (1 << j)) != 0) {
+                if ((b & (byte)(1 << j)) != 0) {
                     if (firstBit) {
                         // First bit - copy base point
                         copyPoint(pointX2, resultX);
@@ -491,7 +491,7 @@ public class ECMath {
                     if (!first) {
                         modSquare(result, result);
                     }
-                    if ((e & (1 << j)) != 0 && !first) {
+                    if ((e & (byte)(1 << j)) != 0 && !first) {
                         modMul(result, tmp4, result);
                     }
                     first = false;
