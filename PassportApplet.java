@@ -560,9 +560,6 @@ public class PassportApplet extends Applet implements ISO7816 {
             // Clear sensitive data
             ecMath.clear();
             
-            // TODO: Derive session keys from shared secret
-            // TODO: Initialize new secure messaging with derived keys
-            
             // Derive session keys using KDF (ICAO 9303 Part 11)
             deriveSessionKeysFromCA(sharedSecret, (short)0, secretLen);
             
