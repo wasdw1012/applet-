@@ -33,6 +33,21 @@ public class ECMath {
         (byte)0x3B, (byte)0xCE, (byte)0x3C, (byte)0x3E, (byte)0x27, (byte)0xD2, (byte)0x60, (byte)0x4B
     };
     
+    // P-256 base point G (uncompressed format)
+    private static final byte[] P256_G = {
+        (byte)0x04,  // Uncompressed point indicator
+        // X coordinate
+        (byte)0x6B, (byte)0x17, (byte)0xD1, (byte)0xF2, (byte)0xE1, (byte)0x2C, (byte)0x42, (byte)0x47,
+        (byte)0xF8, (byte)0xBC, (byte)0xE6, (byte)0xE5, (byte)0x63, (byte)0xA4, (byte)0x40, (byte)0xF2,
+        (byte)0x77, (byte)0x03, (byte)0x7D, (byte)0x81, (byte)0x2D, (byte)0xEB, (byte)0x33, (byte)0xA0,
+        (byte)0xF4, (byte)0xA1, (byte)0x39, (byte)0x45, (byte)0xD8, (byte)0x98, (byte)0xC2, (byte)0x96,
+        // Y coordinate
+        (byte)0x4F, (byte)0xE3, (byte)0x42, (byte)0xE2, (byte)0xFE, (byte)0x1A, (byte)0x7F, (byte)0x9B,
+        (byte)0x8E, (byte)0xE7, (byte)0xEB, (byte)0x4A, (byte)0x7C, (byte)0x0F, (byte)0x9E, (byte)0x16,
+        (byte)0x2B, (byte)0xCE, (byte)0x33, (byte)0x57, (byte)0x6B, (byte)0x31, (byte)0x5E, (byte)0xCE,
+        (byte)0xCB, (byte)0xB6, (byte)0x40, (byte)0x68, (byte)0x37, (byte)0xBF, (byte)0x51, (byte)0xF5
+    };
+    
     // Constants
     private static final short COORD_SIZE = 32;
     private static final short BIGNAT_SIZE = 33; // Extra byte for operations
@@ -675,10 +690,89 @@ public class ECMath {
                Util.arrayCompare(y1, (short)0, y2, (short)0, BIGNAT_SIZE) == 0;
     }
     
-
+    /**
+     * Generate a cryptographically secure random scalar (private key)
+     * @param buffer output buffer for the scalar
+     * @param offset offset in the output buffer
+     * @param length length of scalar (should be 32 for P-256)
+     */
+    public void generateRandomScalar(byte[] buffer, short offset, short length) {
+        // Generate random bytes
+        RandomData rng = RandomData.getInstance(RandomData.ALG_SECURE_RANDOM);
+        rng.generateData(buffer, offset, length);
+        
+        // Ensure the scalar is not zero (extremely rare but possible)
+        // For simplicity, just set the LSB to 1 if all bytes are zero
+        boolean allZero = true;
+        for (short i = 0; i < length; i++) {
+            if (buffer[(short)(offset + i)] != 0) {
+                allZero = false;
+                break;
+            }
+        }
+        if (allZero) {
+            buffer[(short)(offset + length - 1)] = 1;
+        }
+    }
     
     /**
-     * Clear all temporary data
+     * Perform scalar multiplication: scalar × point = resultPoint
+     * @param scalar the scalar value (private key)
+     * @param scalarOffset offset of scalar
+     * @param point the input point (65 bytes, uncompressed format)
+     * @param pointOffset offset of input point
+     * @param resultPoint output buffer for result point (65 bytes)
+     * @param resultOffset offset in output buffer
+     * @return length of result point (always 65 for uncompressed P-256)
+     */
+    public short scalarMultiply(
+        byte[] scalar, short scalarOffset,
+        byte[] point, short pointOffset, 
+        byte[] resultPoint, short resultOffset
+    ) {
+        // Validate point format
+        if (point[pointOffset] != UNCOMPRESSED_POINT) {
+            ISOException.throwIt(SW_INVALID_POINT_FORMAT);
+        }
+        
+        // Extract X and Y coordinates from input point
+        Util.arrayCopy(point, (short)(pointOffset + 1), pointX1, (short)1, COORD_SIZE);
+        Util.arrayCopy(point, (short)(pointOffset + 1 + COORD_SIZE), pointY1, (short)1, COORD_SIZE);
+        pointX1[0] = 0;  // Ensure MSB is 0 for Bignat operations
+        pointY1[0] = 0;
+        
+        // Perform scalar multiplication using existing private method
+        scalarMultiply(scalar, scalarOffset, pointX1, pointY1, pointX3, pointY3);
+        
+        // Format result as uncompressed point
+        resultPoint[resultOffset] = UNCOMPRESSED_POINT;
+        // Copy X coordinate (skip first byte which is 0)
+        Util.arrayCopy(pointX3, (short)1, resultPoint, (short)(resultOffset + 1), COORD_SIZE);
+        // Copy Y coordinate (skip first byte which is 0)
+        Util.arrayCopy(pointY3, (short)1, resultPoint, (short)(resultOffset + 1 + COORD_SIZE), COORD_SIZE);
+        
+        return POINT_SIZE;
+    }
+    
+    /**
+     * Generate public key from private key (privateKey × G)
+     * @param privateKey the private key
+     * @param privateKeyOffset offset of private key
+     * @param publicKey output buffer for public key (65 bytes)
+     * @param publicKeyOffset offset in output buffer
+     * @return length of public key (always 65 for uncompressed P-256)
+     */
+    public short generatePublicKey(
+        byte[] privateKey, short privateKeyOffset,
+        byte[] publicKey, short publicKeyOffset
+    ) {
+        return scalarMultiply(privateKey, privateKeyOffset, 
+                            P256_G, (short)0, 
+                            publicKey, publicKeyOffset);
+    }
+    
+    /**
+     * Clear all sensitive data
      */
     public void clear() {
         clearArray(tmp1);
