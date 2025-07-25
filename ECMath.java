@@ -146,6 +146,11 @@ public class ECMath {
         pointX1[0] = 0;
         pointY1[0] = 0;
         
+        // Validate that the point is on the curve
+        if (!isPointOnCurve(pointX1, pointY1)) {
+            ISOException.throwIt(SW_INVALID_POINT_FORMAT);
+        }
+        
         // Perform scalar multiplication
         scalarMultiply(privateKeyS, privateKeyOffset, pointX1, pointY1, pointX3, pointY3);
         
@@ -568,6 +573,41 @@ public class ECMath {
         Util.arrayCopy(small, (short)0, tmp6, 
                       (short)(RSA_BLOCK_SIZE - small.length), (short)small.length);
         return tmp6;
+    }
+    
+    /**
+     * Verify if a point is on the P-256 curve
+     * Checks: y^2 = x^3 + ax + b (mod p)
+     */
+    private boolean isPointOnCurve(byte[] x, byte[] y) {
+        // Handle point at infinity
+        if (isZero(x) && isZero(y)) {
+            return true;
+        }
+        
+        // Calculate left side: y^2
+        modSquare(y, tmp1);
+        
+        // Calculate right side: x^3 + ax + b
+        // First: x^3
+        modSquare(x, tmp2);
+        modMul(tmp2, x, tmp3);
+        
+        // Then: ax (where a = P256_A)
+        byte[] aValue = new byte[RSA_BLOCK_SIZE];
+        prependZeros(P256_A, (short)0, COORD_SIZE, aValue, (short)0, RSA_BLOCK_SIZE);
+        modMul(x, aValue, tmp2);
+        
+        // Add: x^3 + ax
+        modAdd(tmp3, tmp2, tmp4);
+        
+        // Finally add b: x^3 + ax + b
+        byte[] bValue = new byte[RSA_BLOCK_SIZE];
+        prependZeros(P256_B, (short)0, COORD_SIZE, bValue, (short)0, RSA_BLOCK_SIZE);
+        modAdd(tmp4, bValue, tmp2);
+        
+        // Compare y^2 with x^3 + ax + b
+        return isEqual(tmp1, tmp2);
     }
     
 
