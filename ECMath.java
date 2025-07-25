@@ -355,26 +355,19 @@ public class ECMath {
         modSub(tmp2, tmp3, tmp5);
         modSub(tmp5, tmp4, tmp5);
         
-        // Divide by 2: Since p is odd, 2^(-1) = (p+1)/2
-        // First compute (p+1)/2
-        copyBignat(modP, tmp6);
-        // Add 1
-        short carry = 1;
-        for (short i = (short)(RSA_BLOCK_SIZE - 1); i >= 0 && carry > 0; i--) {
-            short sum = (short)((tmp6[i] & 0xFF) + carry);
-            tmp6[i] = (byte)sum;
-            carry = (short)(sum >> 8);
-        }
-        // Divide by 2 (right shift by 1)
-        carry = 0;
-        for (short i = 0; i < RSA_BLOCK_SIZE; i++) {
-            short current = (short)((tmp6[i] & 0xFF) | (carry << 8));
-            tmp6[i] = (byte)(current >> 1);
-            carry = (short)(current & 1);
+        // Divide by 2: simple right shift since 2ab < 2p
+        // If LSB is 1, add p first to make it even
+        if ((tmp5[RSA_BLOCK_SIZE - 1] & 1) != 0) {
+            add(tmp5, modP, tmp5);
         }
         
-        // result = 2ab * 2^(-1) = ab
-        basicModMul(tmp5, tmp6, result);
+        // Right shift by 1
+        short carry = 0;
+        for (short i = 0; i < RSA_BLOCK_SIZE; i++) {
+            short current = (short)((tmp5[i] & 0xFF) | (carry << 8));
+            result[i] = (byte)(current >> 1);
+            carry = (short)((current & 1) << 7);
+        }
     }
     
     /**
@@ -402,12 +395,18 @@ public class ECMath {
      * Modular square
      */
     private void modSquare(byte[] a, byte[] result) {
-        if (rsaCipher != null && false) { // Disabled - use multiplication instead
+        if (rsaCipher != null) {
             // Use RSA with exponent 2
             rsaPubKey.setExponent(new byte[]{2}, (short)0, (short)1);
+            rsaPubKey.setModulus(modP, (short)0, RSA_BLOCK_SIZE);
             rsaCipher.init(rsaPubKey, Cipher.MODE_ENCRYPT);
-            rsaCipher.doFinal(a, (short)0, RSA_BLOCK_SIZE, tmp3, (short)0);
-            mod(tmp3, result);
+            short len = rsaCipher.doFinal(a, (short)0, RSA_BLOCK_SIZE, result, (short)0);
+            // Pad result if needed
+            if (len < RSA_BLOCK_SIZE) {
+                Util.arrayCopyNonAtomic(result, (short)0, tmp3, (short)(RSA_BLOCK_SIZE - len), len);
+                Util.arrayFillNonAtomic(tmp3, (short)0, (short)(RSA_BLOCK_SIZE - len), (byte)0);
+                Util.arrayCopyNonAtomic(tmp3, (short)0, result, (short)0, RSA_BLOCK_SIZE);
+            }
         } else {
             modMul(a, a, result);
         }
