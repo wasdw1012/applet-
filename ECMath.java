@@ -1,4 +1,4 @@
-package com.passport.applet;
+package com.deepsea.passport;
 
 import javacard.framework.*;
 import javacard.security.*;
@@ -335,7 +335,8 @@ public class ECMath {
         modExp(twentyFour, tmp3, tmp4);
         
         // result = tmp5 * 24^(-1) mod p
-        modMul(tmp5, tmp4, result);
+        // Use basic multiplication to avoid recursion
+        basicModMul(tmp5, tmp4, result);
     }
     
     /**
@@ -453,11 +454,23 @@ public class ECMath {
         
         // Use RSA engine with custom exponent
         short expLen = RSA_BLOCK_SIZE;
-        while (expLen > 0 && exp[RSA_BLOCK_SIZE - expLen] == 0) {
-            expLen--;
+        short expStart = 0;
+        
+        // Find first non-zero byte
+        while (expStart < RSA_BLOCK_SIZE && exp[expStart] == 0) {
+            expStart++;
         }
         
-        rsaPubKey.setExponent(exp, (short)(RSA_BLOCK_SIZE - expLen), expLen);
+        if (expStart == RSA_BLOCK_SIZE) {
+            // Exponent is zero - result is 1
+            Util.arrayFillNonAtomic(result, (short)0, RSA_BLOCK_SIZE, (byte)0);
+            result[RSA_BLOCK_SIZE - 1] = 1;
+            return;
+        }
+        
+        expLen = (short)(RSA_BLOCK_SIZE - expStart);
+        
+        rsaPubKey.setExponent(exp, expStart, expLen);
         rsaPubKey.setModulus(modP, (short)0, RSA_BLOCK_SIZE);
         rsaCipher.init(rsaPubKey, Cipher.MODE_ENCRYPT);
         
