@@ -244,10 +244,14 @@ class PassportCertificateValidator:
                 
             # 验证有效期
             now = datetime.datetime.now(datetime.timezone.utc)  # 返回 timezone-aware UTC 时间
-            if now < cert.not_valid_before:
+            # 将证书时间转换为 timezone-aware (假设是 UTC)
+            not_valid_before_utc = cert.not_valid_before.replace(tzinfo=datetime.timezone.utc)
+            not_valid_after_utc = cert.not_valid_after.replace(tzinfo=datetime.timezone.utc)
+            
+            if now < not_valid_before_utc:
                 result['errors'].append("证书尚未生效")
                 self.log("证书尚未生效", "ERROR")
-            elif now > cert.not_valid_after:
+            elif now > not_valid_after_utc:
                 result['errors'].append("证书已过期")
                 self.log("证书已过期", "ERROR")
             else:
@@ -342,22 +346,26 @@ class PassportCertificateValidator:
                     self.log(f"DSC签名验证失败: {str(e)}", "ERROR")
                     
             # 使用OpenSSL验证证书链
-            # 先将CSCA写入临时文件
-            with open('temp_csca.pem', 'wb') as f:
-                f.write(self.trust_chain['csca_cert'].public_bytes(serialization.Encoding.PEM))
+            if 'csca_cert' in self.trust_chain:
+                # 先将CSCA写入临时文件
+                with open('temp_csca.pem', 'wb') as f:
+                    f.write(self.trust_chain['csca_cert'].public_bytes(serialization.Encoding.PEM))
+                    
+                success, stdout, stderr = self.run_openssl_command([
+                    'verify', '-CAfile', 'temp_csca.pem', 
+                    self.FILE_PATHS['dsc_cert']
+                ])
                 
-            success, stdout, stderr = self.run_openssl_command([
-                'verify', '-CAfile', 'temp_csca.pem', 
-                self.FILE_PATHS['dsc_cert']
-            ])
-            
-            os.remove('temp_csca.pem')
-            
-            if success:
-                self.log("OpenSSL证书链验证: 通过")
+                os.remove('temp_csca.pem')
+                
+                if success:
+                    self.log("OpenSSL证书链验证: 通过")
+                else:
+                    result['errors'].append(f"OpenSSL证书链验证失败: {stderr}")
+                    self.log(f"OpenSSL证书链验证失败: {stderr}", "ERROR")
             else:
-                result['errors'].append(f"OpenSSL证书链验证失败: {stderr}")
-                self.log(f"OpenSSL证书链验证失败: {stderr}", "ERROR")
+                result['errors'].append("无法进行OpenSSL证书链验证: CSCA证书未加载")
+                self.log("无法进行OpenSSL证书链验证: CSCA证书未加载", "ERROR")
                 
             # 保存DSC证书
             self.trust_chain['dsc_cert'] = cert
@@ -1225,13 +1233,19 @@ class PassportCertificateValidator:
         
         if csca_cert and dsc_cert:
             # 检查证书有效期
-            if csca_cert.not_valid_before <= now <= csca_cert.not_valid_after:
+            # 将证书时间转换为 timezone-aware
+            csca_not_valid_before = csca_cert.not_valid_before.replace(tzinfo=datetime.timezone.utc)
+            csca_not_valid_after = csca_cert.not_valid_after.replace(tzinfo=datetime.timezone.utc)
+            dsc_not_valid_before = dsc_cert.not_valid_before.replace(tzinfo=datetime.timezone.utc)
+            dsc_not_valid_after = dsc_cert.not_valid_after.replace(tzinfo=datetime.timezone.utc)
+            
+            if csca_not_valid_before <= now <= csca_not_valid_after:
                 self.log("✓ CSCA证书在有效期内")
             else:
                 result['warnings'].append("CSCA证书不在有效期内")
                 self.log("⚠ CSCA证书不在有效期内", "WARNING")
             
-            if dsc_cert.not_valid_before <= now <= dsc_cert.not_valid_after:
+            if dsc_not_valid_before <= now <= dsc_not_valid_after:
                 self.log("✓ DSC证书在有效期内")
             else:
                 result['warnings'].append("DSC证书不在有效期内")
