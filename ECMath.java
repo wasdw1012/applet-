@@ -173,8 +173,8 @@ public class ECMath {
         Util.arrayFillNonAtomic(resultY, (short)0, BIGNAT_SIZE, (byte)0);
         
         // Copy base point
-        copyBignat(pointX, pointX2);
-        copyBignat(pointY, pointY2);
+        Util.arrayCopy(pointX, (short)0, pointX2, (short)0, BIGNAT_SIZE);
+        Util.arrayCopy(pointY, (short)0, pointY2, (short)0, BIGNAT_SIZE);
         
         boolean firstBit = true;
         
@@ -191,8 +191,8 @@ public class ECMath {
                 if ((b & (1 << j)) != 0) {
                     if (firstBit) {
                         // First bit - copy base point
-                        copyBignat(pointX2, resultX);
-                        copyBignat(pointY2, resultY);
+                        copyPoint(pointX2, resultX);
+                        copyPoint(pointY2, resultY);
                         firstBit = false;
                     } else {
                         // Add base point
@@ -212,14 +212,20 @@ public class ECMath {
         byte[] x3, byte[] y3
     ) {
         // Check for point at infinity
-        if (isZero(x1) && isZero(y1)) {
-            copyBignat(x1, x3);
-            copyBignat(y1, y3);
+        if (isPointZero(x1) && isPointZero(y1)) {
+            copyPoint(x1, x3);
+            copyPoint(y1, y3);
             return;
         }
         
+        // Convert point coordinates to RSA_BLOCK_SIZE for modular operations
+        byte[] x1Full = new byte[RSA_BLOCK_SIZE];
+        byte[] y1Full = new byte[RSA_BLOCK_SIZE];
+        prependZeros(x1, (short)0, BIGNAT_SIZE, x1Full, (short)0, RSA_BLOCK_SIZE);
+        prependZeros(y1, (short)0, BIGNAT_SIZE, y1Full, (short)0, RSA_BLOCK_SIZE);
+        
         // tmp1 = x1^2
-        modSquare(x1, tmp1);
+        modSquare(x1Full, tmp1);
         
         // tmp2 = 3 * x1^2
         copyBignat(tmp1, tmp2);
@@ -227,28 +233,31 @@ public class ECMath {
         modAdd(tmp2, tmp1, tmp2);
         
         // tmp2 = 3*x1^2 + a (where a = P256_A = p-3)
-        // Since P256_A is already in RSA size format in modP initialization
         byte[] aValue = new byte[RSA_BLOCK_SIZE];
         prependZeros(P256_A, (short)0, COORD_SIZE, aValue, (short)0, RSA_BLOCK_SIZE);
         modAdd(tmp2, aValue, tmp2);
         
         // tmp3 = 2*y1
-        modAdd(y1, y1, tmp3);
+        modAdd(y1Full, y1Full, tmp3);
         
         // tmp4 = tmp2 / tmp3 = lambda
         modDiv(tmp2, tmp3, tmp4);
         
         // x3 = lambda^2 - 2*x1
         modSquare(tmp4, tmp5);
-        modAdd(x1, x1, tmp3);
-        modSub(tmp5, tmp3, x3);
+        modAdd(x1Full, x1Full, tmp3);
+        modSub(tmp5, tmp3, tmp5);
         
         // y3 = lambda*(x1 - x3) - y1
-        modSub(x1, x3, tmp5);
-        modMul(tmp4, tmp5, tmp3);
-        modSub(tmp3, y1, y3);
+        modSub(x1Full, tmp5, tmp6);
+        modMul(tmp4, tmp6, tmp3);
+        modSub(tmp3, y1Full, tmp6);
+        
+        // Copy results back to 33-byte format
+        Util.arrayCopy(tmp5, (short)(RSA_BLOCK_SIZE - BIGNAT_SIZE), x3, (short)0, BIGNAT_SIZE);
+        Util.arrayCopy(tmp6, (short)(RSA_BLOCK_SIZE - BIGNAT_SIZE), y3, (short)0, BIGNAT_SIZE);
     }
-    
+
     /**
      * Point addition: R = P + Q
      */
@@ -258,37 +267,51 @@ public class ECMath {
         byte[] x3, byte[] y3
     ) {
         // Check if same point
-        if (isEqual(x1, x2) && isEqual(y1, y2)) {
+        if (isPointEqual(x1, y1, x2, y2)) {
             pointDouble(x1, y1, x3, y3);
             return;
         }
         
         // Check for point at infinity
-        if (isZero(x1) && isZero(y1)) {
-            copyBignat(x2, x3);
-            copyBignat(y2, y3);
+        if (isPointZero(x1) && isPointZero(y1)) {
+            copyPoint(x2, x3);
+            copyPoint(y2, y3);
             return;
         }
-        if (isZero(x2) && isZero(y2)) {
-            copyBignat(x1, x3);
-            copyBignat(y1, y3);
+        if (isPointZero(x2) && isPointZero(y2)) {
+            copyPoint(x1, x3);
+            copyPoint(y1, y3);
             return;
         }
         
+        // Convert to full size
+        byte[] x1Full = new byte[RSA_BLOCK_SIZE];
+        byte[] y1Full = new byte[RSA_BLOCK_SIZE];
+        byte[] x2Full = new byte[RSA_BLOCK_SIZE];
+        byte[] y2Full = new byte[RSA_BLOCK_SIZE];
+        prependZeros(x1, (short)0, BIGNAT_SIZE, x1Full, (short)0, RSA_BLOCK_SIZE);
+        prependZeros(y1, (short)0, BIGNAT_SIZE, y1Full, (short)0, RSA_BLOCK_SIZE);
+        prependZeros(x2, (short)0, BIGNAT_SIZE, x2Full, (short)0, RSA_BLOCK_SIZE);
+        prependZeros(y2, (short)0, BIGNAT_SIZE, y2Full, (short)0, RSA_BLOCK_SIZE);
+        
         // lambda = (y2 - y1) / (x2 - x1)
-        modSub(y2, y1, tmp1);
-        modSub(x2, x1, tmp2);
+        modSub(y2Full, y1Full, tmp1);
+        modSub(x2Full, x1Full, tmp2);
         modDiv(tmp1, tmp2, tmp3);
         
         // x3 = lambda^2 - x1 - x2
         modSquare(tmp3, tmp4);
-        modSub(tmp4, x1, tmp5);
-        modSub(tmp5, x2, x3);
+        modSub(tmp4, x1Full, tmp5);
+        modSub(tmp5, x2Full, tmp5);
         
         // y3 = lambda*(x1 - x3) - y1
-        modSub(x1, x3, tmp4);
-        modMul(tmp3, tmp4, tmp5);
-        modSub(tmp5, y1, y3);
+        modSub(x1Full, tmp5, tmp4);
+        modMul(tmp3, tmp4, tmp6);
+        modSub(tmp6, y1Full, tmp6);
+        
+        // Copy results back
+        Util.arrayCopy(tmp5, (short)(RSA_BLOCK_SIZE - BIGNAT_SIZE), x3, (short)0, BIGNAT_SIZE);
+        Util.arrayCopy(tmp6, (short)(RSA_BLOCK_SIZE - BIGNAT_SIZE), y3, (short)0, BIGNAT_SIZE);
     }
     
     /**
@@ -312,6 +335,7 @@ public class ECMath {
     private void rsaTrickMultiply(byte[] a, byte[] b, byte[] result) {
         // Set RSA public exponent to 3
         rsaPubKey.setExponent(new byte[]{3}, (short)0, (short)1);
+        rsaPubKey.setModulus(modP, (short)0, RSA_BLOCK_SIZE);
         
         // Compute (a-b)^3 and (a+b)^3
         modSub(a, b, tmp5);
@@ -405,8 +429,8 @@ public class ECMath {
     private void modSub(byte[] a, byte[] b, byte[] result) {
         if (compare(a, b) < 0) {
             // a < b, compute (a + p) - b
-            add(a, modP, tmp6);
-            subtract(tmp6, b, result);
+            add(a, modP, result);
+            subtract(result, b, result);
         } else {
             subtract(a, b, result);
         }
@@ -550,8 +574,19 @@ public class ECMath {
         Util.arrayCopy(src, (short)0, dst, (short)0, RSA_BLOCK_SIZE);
     }
     
+    private void copyPoint(byte[] src, byte[] dst) {
+        Util.arrayCopy(src, (short)0, dst, (short)0, BIGNAT_SIZE);
+    }
+    
     private boolean isZero(byte[] a) {
         for (short i = 0; i < RSA_BLOCK_SIZE; i++) {
+            if (a[i] != 0) return false;
+        }
+        return true;
+    }
+    
+    private boolean isPointZero(byte[] a) {
+        for (short i = 0; i < BIGNAT_SIZE; i++) {
             if (a[i] != 0) return false;
         }
         return true;
@@ -581,22 +616,28 @@ public class ECMath {
      */
     private boolean isPointOnCurve(byte[] x, byte[] y) {
         // Handle point at infinity
-        if (isZero(x) && isZero(y)) {
+        if (isPointZero(x) && isPointZero(y)) {
             return true;
         }
         
+        // Convert to full size for calculations
+        byte[] xFull = new byte[RSA_BLOCK_SIZE];
+        byte[] yFull = new byte[RSA_BLOCK_SIZE];
+        prependZeros(x, (short)0, BIGNAT_SIZE, xFull, (short)0, RSA_BLOCK_SIZE);
+        prependZeros(y, (short)0, BIGNAT_SIZE, yFull, (short)0, RSA_BLOCK_SIZE);
+        
         // Calculate left side: y^2
-        modSquare(y, tmp1);
+        modSquare(yFull, tmp1);
         
         // Calculate right side: x^3 + ax + b
         // First: x^3
-        modSquare(x, tmp2);
-        modMul(tmp2, x, tmp3);
+        modSquare(xFull, tmp2);
+        modMul(tmp2, xFull, tmp3);
         
         // Then: ax (where a = P256_A)
         byte[] aValue = new byte[RSA_BLOCK_SIZE];
         prependZeros(P256_A, (short)0, COORD_SIZE, aValue, (short)0, RSA_BLOCK_SIZE);
-        modMul(x, aValue, tmp2);
+        modMul(xFull, aValue, tmp2);
         
         // Add: x^3 + ax
         modAdd(tmp3, tmp2, tmp4);
@@ -608,6 +649,11 @@ public class ECMath {
         
         // Compare y^2 with x^3 + ax + b
         return isEqual(tmp1, tmp2);
+    }
+    
+    private boolean isPointEqual(byte[] x1, byte[] y1, byte[] x2, byte[] y2) {
+        return Util.arrayCompare(x1, (short)0, x2, (short)0, BIGNAT_SIZE) == 0 &&
+               Util.arrayCompare(y1, (short)0, y2, (short)0, BIGNAT_SIZE) == 0;
     }
     
 
