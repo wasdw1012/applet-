@@ -333,39 +333,48 @@ public class ECMath {
      * RSA trick multiplication
      */
     private void rsaTrickMultiply(byte[] a, byte[] b, byte[] result) {
-        // Set RSA public exponent to 3
-        rsaPubKey.setExponent(new byte[]{3}, (short)0, (short)1);
+        // Set RSA public exponent to 2 (using (x+y)^2 method from jcmathlib)
+        rsaPubKey.setExponent(new byte[]{2}, (short)0, (short)1);
         rsaPubKey.setModulus(modP, (short)0, RSA_BLOCK_SIZE);
-        
-        // Compute (a-b)^3 and (a+b)^3
-        modSub(a, b, tmp5);
-        modAdd(a, b, tmp6);
         
         rsaCipher.init(rsaPubKey, Cipher.MODE_ENCRYPT);
         
-        // Compute (a-b)^3
-        rsaCipher.doFinal(tmp5, (short)0, RSA_BLOCK_SIZE, tmp3, (short)0);
-        // Compute (a+b)^3  
-        rsaCipher.doFinal(tmp6, (short)0, RSA_BLOCK_SIZE, tmp4, (short)0);
+        // Compute (a+b)
+        modAdd(a, b, tmp1);
         
-        // result = ((a+b)^3 - (a-b)^3) / 24
-        modSub(tmp4, tmp3, tmp5);
+        // Compute (a+b)^2
+        rsaCipher.doFinal(tmp1, (short)0, RSA_BLOCK_SIZE, tmp2, (short)0);
         
-        // Divide by 24 in modular arithmetic
-        // First compute 24^(-1) mod p
-        byte[] twentyFour = new byte[RSA_BLOCK_SIZE];
-        twentyFour[RSA_BLOCK_SIZE - 1] = 24;
+        // Compute a^2
+        rsaCipher.doFinal(a, (short)0, RSA_BLOCK_SIZE, tmp3, (short)0);
         
-        // Compute p-2 for modular inverse
-        copyBignat(modP, tmp3);
-        tmp3[RSA_BLOCK_SIZE - 1] -= 2;
+        // Compute b^2
+        rsaCipher.doFinal(b, (short)0, RSA_BLOCK_SIZE, tmp4, (short)0);
         
-        // 24^(-1) = 24^(p-2) mod p
-        modExp(twentyFour, tmp3, tmp4);
+        // (a+b)^2 - a^2 - b^2 = 2ab
+        modSub(tmp2, tmp3, tmp5);
+        modSub(tmp5, tmp4, tmp5);
         
-        // result = tmp5 * 24^(-1) mod p
-        // Use basic multiplication to avoid recursion
-        basicModMul(tmp5, tmp4, result);
+        // Divide by 2: Since p is odd, 2^(-1) = (p+1)/2
+        // First compute (p+1)/2
+        copyBignat(modP, tmp6);
+        // Add 1
+        short carry = 1;
+        for (short i = (short)(RSA_BLOCK_SIZE - 1); i >= 0 && carry > 0; i--) {
+            short sum = (short)((tmp6[i] & 0xFF) + carry);
+            tmp6[i] = (byte)sum;
+            carry = (short)(sum >> 8);
+        }
+        // Divide by 2 (right shift by 1)
+        carry = 0;
+        for (short i = 0; i < RSA_BLOCK_SIZE; i++) {
+            short current = (short)((tmp6[i] & 0xFF) | (carry << 8));
+            tmp6[i] = (byte)(current >> 1);
+            carry = (short)(current & 1);
+        }
+        
+        // result = 2ab * 2^(-1) = ab
+        basicModMul(tmp5, tmp6, result);
     }
     
     /**
@@ -446,7 +455,18 @@ public class ECMath {
         
         // First compute p-2
         copyBignat(modP, tmp5);
-        tmp5[RSA_BLOCK_SIZE - 1] -= 2;
+        // Subtract 2 with proper borrow handling
+        short borrow = 2;
+        for (short i = (short)(RSA_BLOCK_SIZE - 1); i >= 0 && borrow > 0; i--) {
+            short val = (short)((tmp5[i] & 0xFF) - borrow);
+            if (val < 0) {
+                val += 256;
+                borrow = 1;
+            } else {
+                borrow = 0;
+            }
+            tmp5[i] = (byte)val;
+        }
         
         // Compute b^(p-2) mod p
         modExp(b, tmp5, tmp6);
