@@ -27,16 +27,16 @@ BIOMETRIC_DATA_BLOCK_TAG = 0x5F2E
 ICAO_HEADER_VERSION_TAG = 0x80
 BIOMETRIC_TYPE_TAG = 0x81
 BIOMETRIC_SUBTYPE_TAG = 0x82
-CREATION_DATE_TIME_TAG = 0x83
-VALIDITY_PERIOD_TAG = 0x85
-CREATOR_TAG = 0x86
+CREATION_DATE_TIME_TAG = 0x85  # BDB Creation Date
+VALIDITY_PERIOD_TAG = 0x86     # BDB Validity Period  
+CREATOR_TAG = 0x89             # BDB Creator
 FORMAT_OWNER_TAG = 0x87  
 FORMAT_TYPE_TAG = 0x88  
 
 
 SAMPLE_NUMBER_TAG = 0x02
 
-CBEFF_PATRON_HEADER_VERSION = 0x0101
+CBEFF_PATRON_HEADER_VERSION = 0x01  # 必须是0x01，不是0x0101
 BIOMETRIC_TYPE_FACIAL_FEATURES = 0x02
 BIOMETRIC_SUBTYPE_NO_INFO = 0x00
 
@@ -106,11 +106,12 @@ def encode_tlv(tag, value):
     return result
 
 def encode_datetime(dt):
-    """Encode datetime in compact binary format for ICAO compliance"""
-
-    year = dt.year
-    return struct.pack('>HBBBBB', 
-                      year,      # 修复 年份 2字节大端序！
+    """Encode datetime in 7-byte format for CBEFF compliance"""
+    # 年份用BCD编码（如2024 -> 0x20, 0x24）
+    year_str = str(dt.year)
+    year_bcd = bytes([int(year_str[:2]), int(year_str[2:])])
+    
+    return year_bcd + struct.pack('BBBBB',
                       dt.month,  # 月份 (1字节)
                       dt.day,    # 日期 (1字节) 
                       dt.hour,   # 小时 (1字节)
@@ -312,7 +313,7 @@ def create_facial_record_header():
 
     header = b''
     header += b'FAC\x00'  # Format Identifier (4 bytes) -
-    header += struct.pack('>I', 0x30313030)  # 就他妈是ASCII "0100"就他妈是ASCII "0100"就他妈是ASCII "0100"
+    header += b'010\x00'  # Version Number - 必须是 '010\x00' (ASCII "010" + null)
     header += b'\x00\x00\x00\x00'  # Length (placeholder, 4 bytes, big-endian)
     header += struct.pack('>H', 1)  # Number of Facial Images (2 bytes, big-endian)
     return header
