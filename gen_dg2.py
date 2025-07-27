@@ -40,8 +40,8 @@ CBEFF_PATRON_HEADER_VERSION = 0x0101
 BIOMETRIC_TYPE_FACIAL_FEATURES = 0x02
 BIOMETRIC_SUBTYPE_NO_INFO = 0x00
 
-FORMAT_OWNER_ICAO = 0x0101  
-FORMAT_TYPE_FACIAL = 0x0005 
+FORMAT_OWNER_ICAO = 0x0101  # ISO/IEC JTC1/SC37
+FORMAT_TYPE_FACIAL = 0x0008  # Face image data (严格验证要求0x0008，不是0x0005) 
 
 # Facial Record Constants
 FACE_IMAGE_TYPE_BASIC = 0x00
@@ -350,8 +350,8 @@ def create_facial_information(image_data, image_type, width, height):
     # Feature Mask (3 bytes) - 全部0
     facial_info += struct.pack('>BBB', 0, 0, 0)
     
-    # Expression (2 bytes) - 0 = 中性表情
-    facial_info += struct.pack('>H', 0)
+    # Expression (2 bytes) - 0x0001 = 中性表情 (严格验证要求)
+    facial_info += struct.pack('>H', 0x0001)
     
     # Pose Angle (3 bytes) - 全部0
     facial_info += struct.pack('>BBB', 0, 0, 0)
@@ -359,8 +359,8 @@ def create_facial_information(image_data, image_type, width, height):
     # Pose Angle Uncertainty (3 bytes) - 全部0
     facial_info += struct.pack('>BBB', 0, 0, 0)
     
-    # Face Image Type (1 byte)
-    facial_info += struct.pack('>B', FACE_IMAGE_TYPE_BASIC)
+    # Face Image Type (1 byte) - 0x01 = Full Frontal (严格验证要求)
+    facial_info += struct.pack('>B', 0x01)  # FACE_IMAGE_TYPE_FULL_FRONTAL
     
     # Image Data Type (1 byte)
     facial_info += struct.pack('>B', image_type)
@@ -380,48 +380,47 @@ def create_facial_information(image_data, image_type, width, height):
     # Device Type (2 bytes, big-endian) - 0 = 未知
     facial_info += struct.pack('>H', 0)
     
-    # Quality (2 bytes, big-endian) - 0 = 未评估
-    facial_info += struct.pack('>H', 0)
+    # Quality (2 bytes, big-endian) - 100 = 高质量 (严格验证要求)
+    facial_info += struct.pack('>H', 100)
     
     return facial_info
 
 def create_biometric_header_template():
     
-    # ICAO Header Version
-    icao_header_version = encode_tlv(ICAO_HEADER_VERSION_TAG, 
-                                   struct.pack('>H', CBEFF_PATRON_HEADER_VERSION))
+    # CBEFF Patron Header Version (Tag 0x80) - 必须是0x01，不是0x0101
+    patron_version = encode_tlv(ICAO_HEADER_VERSION_TAG, bytes([0x01]))
     
-    # Biometric Type
-    biometric_type = encode_tlv(BIOMETRIC_TYPE_TAG, 
-                               bytes([BIOMETRIC_TYPE_FACIAL_FEATURES]))
-    
-    # Biometric Subtype
-    biometric_subtype = encode_tlv(BIOMETRIC_SUBTYPE_TAG, 
-                                  bytes([BIOMETRIC_SUBTYPE_NO_INFO]))
-    
-    # Creation Date/Time
-    now = datetime.now(timezone.utc)
-    creation_datetime = encode_tlv(CREATION_DATE_TIME_TAG, encode_datetime(now))
-    
-    # Validity Period 10年
-    validity_period = encode_tlv(VALIDITY_PERIOD_TAG, 
-                                encode_validity_period(now, now.replace(year=now.year + 10)))
-    
-    # Creator
-    creator = encode_tlv(CREATOR_TAG, struct.pack('>H', 0x0001))
-    
-    # Format Owner
+    # Format Owner (Tag 0x87) - 0x0101 = ISO/IEC JTC1/SC37
     format_owner = encode_tlv(FORMAT_OWNER_TAG, 
                              struct.pack('>H', FORMAT_OWNER_ICAO))
     
-    # Format Type
+    # Format Type (Tag 0x88) - 0x0008 = Face image data
     format_type = encode_tlv(FORMAT_TYPE_TAG, 
                             struct.pack('>H', FORMAT_TYPE_FACIAL))
     
-    # 组合元素
-    header_content = (icao_header_version + biometric_type + biometric_subtype + 
-                     creation_datetime + validity_period + creator +
-                     format_owner + format_type)
+    # Biometric Type (Tag 0x81) - 0x02 = Facial features
+    biometric_type = encode_tlv(BIOMETRIC_TYPE_TAG, 
+                               bytes([BIOMETRIC_TYPE_FACIAL_FEATURES]))
+    
+    # Biometric Subtype (Tag 0x82) - 0x00 = No information
+    biometric_subtype = encode_tlv(BIOMETRIC_SUBTYPE_TAG, 
+                                  bytes([BIOMETRIC_SUBTYPE_NO_INFO]))
+    
+    # Creation Date/Time (Tag 0x85) - 7 bytes
+    now = datetime.now(timezone.utc)
+    creation_date = encode_tlv(0x85, encode_datetime(now))
+    
+    # Validity Period (Tag 0x86) - 8 bytes, 0xFF = no expiry
+    validity_period = encode_tlv(0x86, bytes([0xFF] * 8))
+    
+    # Creator (Tag 0x89) - 18 bytes
+    creator_data = b'PASSPORT_GENERATOR' + b'\x00' * (18 - len(b'PASSPORT_GENERATOR'))
+    creator = encode_tlv(0x89, creator_data[:18])
+    
+    # 按正确顺序组合元素（严格验证可能对顺序敏感）
+    header_content = (patron_version + format_owner + format_type + 
+                     biometric_type + biometric_subtype + 
+                     creation_date + validity_period + creator)
     
     # 生物特征标头
     return encode_tlv(BIOMETRIC_HEADER_TEMPLATE_TAG, header_content)
