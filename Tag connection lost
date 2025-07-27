@@ -42,11 +42,11 @@ BIOMETRIC_TYPE_FACIAL_FEATURES = 0x02
 BIOMETRIC_SUBTYPE_NO_INFO = 0x00
 
 FORMAT_OWNER_ICAO = 0x0101  
-FORMAT_TYPE_FACIAL = 0x0005 
+FORMAT_TYPE_FACIAL = 0x0008  # 不是0x0005！
 
 # Facial Record Constants
 FACE_IMAGE_TYPE_BASIC = 0x00
-
+FACE_IMAGE_TYPE_FULL_FRONTAL = 0x01  # 新增
 # Image Type Constants (严格符合 ISO/IEC 19794-5)
 IMAGE_TYPE_JPEG = 0x01
 IMAGE_TYPE_JPEG2000 = 0x02  # 标准值为0x02
@@ -307,12 +307,11 @@ def convert_image_to_jpeg2000_compact(input_path, target_size=COMPACT_TARGET_SIZ
     return convert_image_to_jpeg_compact(input_path, COMPACT_MIN_SIZE, COMPACT_MAX_SIZE)
 
 def create_facial_record_header():
-
     header = b''
-    header += b'FAC '  # Format Identifier (4 bytes) -
-    header += struct.pack('>I', 0x30313030)  # 就他妈是ASCII "0100
-    header += b'\x00\x00\x00\x00'  # Length (placeholder, 4 bytes, big-endian)
-    header += struct.pack('>H', 1)  # Number of Facial Images (2 bytes, big-endian)
+    header += b'FAC\x00'  # 不是 b'FAC '，必须是FAC加NULL字节
+    header += b'010\x00'  # 不是 b'0100'，必须是010加NULL字节
+    header += b'\x00\x00\x00\x00'  # 长度占位符
+    header += struct.pack('>H', 1)  # 图像数量
     return header
 
 def create_facial_information(image_type: int, width: int, height: int) -> bytes:
@@ -341,7 +340,7 @@ def create_facial_information(image_type: int, width: int, height: int) -> bytes
     logging.info("        [5F2E内部] --- 构建大头信息块 (Image Info) ---")
     image_info = b''
     logging.info("        [5F2E内部]     - 大头类型")
-    image_info += struct.pack('>B', FACE_IMAGE_TYPE_BASIC)
+    image_info += struct.pack('>B', FACE_IMAGE_TYPE_FULL_FRONTAL)  # 新常量
     logging.info("        [5F2E内部]     - 大头数据类型")
     image_info += struct.pack('>B', image_type)
     logging.info("        [5F2E内部]     - 宽度 & 高度")
@@ -358,7 +357,8 @@ def create_facial_information(image_type: int, width: int, height: int) -> bytes
     
     return facial_info + image_info
 
-################### 核心修正：核心函数：创建CBEFF生物特征头部
+
+################### 核心修正创建CBEFF生物特征头部
 def create_biometric_header_template() -> bytes:
     """创建CBEFF生物特征头 (A1模板)"""
     logging.info("    [A1内部] -> 构建CBEFF大头子元素")
@@ -380,7 +380,7 @@ def create_biometric_header_template() -> bytes:
     validity_tlv = encode_tlv(VALIDITY_PERIOD_TAG, encode_validity_period())
     
     logging.info("      [A1内部] - [86] Creator ID")
-    creator_tlv = encode_tlv(CREATOR_TAG, b'DG2_Generator_v2')
+    creator_tlv = encode_tlv(CREATOR_TAG, struct.pack('>H', 0x0001))
     
     logging.info("      [A1内部] - [87] Format Owner (ICAO)")
     owner_tlv = encode_tlv(FORMAT_OWNER_TAG, struct.pack('>H', FORMAT_OWNER_ICAO))
@@ -425,38 +425,24 @@ def create_biometric_data_block(image_data: bytes, image_type: int, width: int, 
 
 # 修正后版本
 def generate_dg2_compact(image_path, output_path, format_preference, min_size, max_size):
-    """
-    (已优化) 根据明确的尺寸参数生成DG2文件。
-    """
+    """根据明确的尺寸参数生成DG2"""
     logging.info(f"生成DG2: {os.path.basename(image_path)} -> {output_path}")
     logging.info(f"目标大小: {min_size/1000:.1f}KB - {max_size/1000:.1f}KB")
-
-    # 注意：这里不再有判断 'compact' 或 'normal' 的 if/elif/else 语句
-
-    try:
-        if format_preference == 'jpeg2000' or (format_preference == 'auto' and HAS_JP2_SUPPORT):
-            try:
-                target = (min_size + max_size) // 2
-                image_data, image_type, width, height = convert_image_to_jpeg2000_compact(image_path, target)
-                format_name = "JPEG2000"
-            except Exception:
-                image_data, image_type, width, height = convert_image_to_jpeg_compact(image_path, min_size, max_size)
-                format_name = "JPEG"
-        else:
-            image_data, image_type, width, height = convert_image_to_jpeg_compact(image_path, min_size, max_size)
-            format_name = "JPEG"
-        
-        logging.info(f"  压缩: {len(image_data)/1000:.1f}KB {format_name} ({width}x{height})")
-        
-    except Exception as e:
-        logging.error(f"图像处理失败: {e}")
+    # 强制使用JPEG2000
+    if not HAS_JP2_SUPPORT:
+        logging.error("JPEG2000支持是必需的！请安装: pip install glymur")
         return False
         
-    # 插入调试码 ---
-    with open('__DEBUG_source_image.jpg', 'wb') as f:
-        f.write(image_data)
-    logging.warning("  [调试] 已将压缩后的原始JPEG数据保存到 __DEBUG_source_image.jpg")
-
+    try:
+        target = (min_size + max_size) // 2
+        image_data, image_type, width, height = convert_image_to_jpeg2000_compact(image_path, target)
+        format_name = "JPEG2000"
+        logging.info(f"  压缩: {len(image_data)/1000:.1f}KB {format_name} ({width}x{height})")
+    except Exception as e:
+        logging.error(f"JPEG2000转换失败: {e}")
+        logging.error("严格验证需要JPEG2000格式")
+        return False
+        
     # DG2套嵌
     logging.info("[套嵌] 构建DG2 TLV")
     
