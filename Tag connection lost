@@ -358,49 +358,7 @@ def create_facial_information(image_type: int, width: int, height: int) -> bytes
     
     return facial_info + image_info
 
-def create_biometric_header_template():
-    
-    # ICAO Header Version
-    icao_header_version = encode_tlv(ICAO_HEADER_VERSION_TAG, 
-                                   struct.pack('>H', CBEFF_PATRON_HEADER_VERSION))
-    
-    # Biometric Type
-    biometric_type = encode_tlv(BIOMETRIC_TYPE_TAG, 
-                               bytes([BIOMETRIC_TYPE_FACIAL_FEATURES]))
-    
-    # Biometric Subtype
-    biometric_subtype = encode_tlv(BIOMETRIC_SUBTYPE_TAG, 
-                                  bytes([BIOMETRIC_SUBTYPE_NO_INFO]))
-    
-    # Creation Date/Time
-    now = datetime.now(timezone.utc)
-    creation_datetime = encode_tlv(CREATION_DATE_TIME_TAG, encode_datetime(now))
-    
-    # Validity Period 10年
-    validity_period = encode_tlv(VALIDITY_PERIOD_TAG, 
-                                encode_validity_period(now, now.replace(year=now.year + 10)))
-    
-    # Creator
-    creator = encode_tlv(CREATOR_TAG, struct.pack('>H', 0x0001))
-    
-    # Format Owner
-    format_owner = encode_tlv(FORMAT_OWNER_TAG, 
-                             struct.pack('>H', FORMAT_OWNER_ICAO))
-    
-    # Format Type
-    format_type = encode_tlv(FORMAT_TYPE_TAG, 
-                            struct.pack('>H', FORMAT_TYPE_FACIAL))
-    
-    # 组合元素
-    header_content = (icao_header_version + biometric_type + biometric_subtype + 
-                     creation_datetime + validity_period + creator +
-                     format_owner + format_type)
-    
-    # 生物特征标头
-    return encode_tlv(BIOMETRIC_HEADER_TEMPLATE_TAG, header_content)
-
 ################### 核心修正：核心函数：创建CBEFF生物特征头部
-# --- 修正后版本 (带详细日志) ---
 def create_biometric_header_template() -> bytes:
     """创建CBEFF生物特征头 (A1模板)"""
     logging.info("    [A1内部] -> 构建CBEFF大头子元素")
