@@ -350,7 +350,7 @@ public class PassportApplet extends Applet implements ISO7816 {
             processPutData(apdu);
             break;
         case INS_MSE:
-            processMSE(apdu, protectedApdu);
+            responseLength = processMSE(apdu, protectedApdu);
             break;
         default:
             ISOException.throwIt(SW_INS_NOT_SUPPORTED);
@@ -508,7 +508,7 @@ public class PassportApplet extends Applet implements ISO7816 {
      * Process MSE (Manage Security Environment) command
      * For CA: receives terminal's ephemeral public key and prepares for key agreement
      */
-    private void processMSE(APDU apdu, boolean protectedApdu) {
+    private short processMSE(APDU apdu, boolean protectedApdu) {
         byte[] buffer = apdu.getBuffer();
         byte p1 = buffer[OFFSET_P1];
         byte p2 = buffer[OFFSET_P2];
@@ -565,15 +565,16 @@ public class PassportApplet extends Applet implements ISO7816 {
         // Derive session keys from shared secret
         deriveSessionKeysFromCA(sharedSecret, (short)0, secretLen);
         
-        // 4. Prepare response with chip's public key
-        short le = apdu.setOutgoing();
-        if (le < 65) {
-            ISOException.throwIt(SW_WRONG_LENGTH);
+        // 4. Prepare response with chip's public key for SM wrapping
+        // Copy chip's public key to APDU buffer at the correct offset for SM
+        short offset = 0;
+        if (protectedApdu) {
+            // Reserve space for SM wrapping (DO'87 header)
+            offset = crypto.getApduBufferOffset((short)65);
         }
         
-        // Send chip's public key (65 bytes) directly
-        apdu.setOutgoingLength((short)65);
-        apdu.sendBytesLong(chipEphemeralPublicKey, (short)0, (short)65);
+        // Copy the public key to buffer
+        Util.arrayCopy(chipEphemeralPublicKey, (short)0, buffer, offset, (short)65);
         
         // 5. Update state and clean up
         volatileState[0] |= CHIP_AUTHENTICATED;
@@ -583,6 +584,10 @@ public class PassportApplet extends Applet implements ISO7816 {
         Util.arrayFillNonAtomic(chipEphemeralPublicKey, (short)0, (short)65, (byte)0);
         Util.arrayFillNonAtomic(sharedSecret, (short)0, (short)32, (byte)0);
         ecMath.clear();
+        
+        // Return the length of data to be sent (65 bytes)
+        // The main process() method will handle SM wrapping if needed
+        return (short)65;
     }
     
     /**
