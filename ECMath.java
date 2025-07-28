@@ -90,7 +90,7 @@ public class ECMath {
         tmp6 = JCSystem.makeTransientByteArray(RSA_BLOCK_SIZE, JCSystem.CLEAR_ON_DESELECT);
         
         // Prepare modulus P in RSA size
-        modP = new byte[RSA_BLOCK_SIZE];
+        modP = JCSystem.makeTransientByteArray(RSA_BLOCK_SIZE, JCSystem.CLEAR_ON_DESELECT);
         prependZeros(P256_P, (short)0, COORD_SIZE, modP, (short)0, RSA_BLOCK_SIZE);
         
         // EC point storage  
