@@ -493,12 +493,12 @@ apdu_analyzer = APDUAnalyzer()
 # 🚨 现代化参数设置
 DEBUG_MODE = True
 VERIFY_AFTER_WRITE = True 
-CHUNK_SIZE = 128                 #🚨龟速求稳！
+CHUNK_SIZE = 64                 #🚨龟速求稳！
 TIMEOUT = 30                    #🚨30秒超时，硬件慢点没事！
 MAX_RETRIES = 1                 #🚨彻底关闭重试！SSC错位必死！
 WRITE_DELAY = 0.5              #🚨写入延迟！
 CHUNK_PROGRESS_DELAY = 0.2     #🚨每10个块的进度延迟！
-HARDWARE_RECOVERY_DELAY = 2.0  #🚨高风险偏移量恢复延迟！
+HARDWARE_RECOVERY_DELAY = 7.0  #🚨高风险偏移量恢复延迟！
 ENABLE_HARDWARE_MONITORING = True
 
 # 🚨 新增：数据完整性监控设置
@@ -1631,13 +1631,16 @@ def perform_chip_authentication(connection, ks_enc_bac: bytes, ks_mac_bac: bytes
     # 发送并接收响应 - 零重试！
     try:
         response_data, sw = send_apdu(connection, mse_apdu, "MSE_SET_AT_CA")
-        
+
         if sw != 0x9000:
             print(f"[FATAL] MSE:SET AT failed: SW={sw:04X}")
             print("[FATAL] CA failed - card state corrupted")
             print("[FATAL] Remove card immediately!")
             raise RuntimeError(f"CA failed, no retry possible: SW={sw:04X}")
-            
+        
+        # 将解析步骤也放入try块，因为解析也可能失败（如MAC校验不过）
+        chip_public_key, _ = parse_sm_response(response_data, ks_enc_bac, ks_mac_bac, ssc_bac)
+        
     except Exception as e:
         print(f"[FATAL] CA communication error: {e}")
         print("[FATAL] SSC continuity broken - card must be reset")
