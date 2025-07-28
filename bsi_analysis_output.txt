@@ -1,0 +1,33 @@
+=== BSI DG2 文件分析 ===
+
+文件大小: 187 字节
+
+1. ASN.1/BER编码分析:
+   检测到应用类标签: 0x75
+   标签 0x75: Application, Constructed, 编号=21, 长度=15079
+
+2. 生物特征数据结构:
+   找到FAC (Face) 生物特征标识在偏移 0x0026
+   版本信息: 00303130
+   检测到生物特征数据记录标签 (0x5F2E)
+
+3. JPEG 2000图像分析:
+   找到JPEG 2000文件头在偏移 0x0064
+
+4. 安全特征分析:
+Traceback (most recent call last):
+  File "/workspace/bsi_dg2_analyzer.py", line 254, in <module>
+    analyze_bsi_dg2(hex_data)
+    ~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "/workspace/bsi_dg2_analyzer.py", line 234, in analyze_bsi_dg2
+    analyzer.analyze()
+    ~~~~~~~~~~~~~~~~^^
+  File "/workspace/bsi_dg2_analyzer.py", line 55, in analyze
+    self._analyze_security_features()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/workspace/bsi_dg2_analyzer.py", line 177, in _analyze_security_features
+    entropy = self._calculate_entropy(block)
+  File "/workspace/bsi_dg2_analyzer.py", line 208, in _calculate_entropy
+    entropy -= p * (p and p * p.bit_length() or 0)
+                              ^^^^^^^^^^^^
+AttributeError: 'float' object has no attribute 'bit_length'
