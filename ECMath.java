@@ -140,9 +140,19 @@ public class ECMath {
      */
     public short performECDH(
         byte[] privateKeyS, short privateKeyOffset,
-        byte[] publicKeyPoint, short publicKeyOffset,
+        byte[] publicKeyPoint, short publicKeyOffset,  
         byte[] sharedSecret, short sharedSecretOffset
     ) {
+        // Parameter validation
+        if (privateKeyS == null || publicKeyPoint == null || sharedSecret == null) {
+            ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+        }
+        
+        // Verify public key format (must be uncompressed)
+        if (publicKeyPoint[publicKeyOffset] != UNCOMPRESSED_POINT) {
+            ISOException.throwIt(SW_INVALID_POINT_FORMAT);
+        }
+        
         // Validate inputs
         if ((short)(privateKeyOffset + COORD_SIZE) > privateKeyS.length ||
             (short)(publicKeyOffset + POINT_SIZE) > publicKeyPoint.length) {
@@ -640,6 +650,11 @@ public class ECMath {
     
     private void prependZeros(byte[] src, short srcOff, short srcLen,
                              byte[] dst, short dstOff, short dstLen) {
+        // Safety check: source must not be larger than destination
+        if (srcLen > dstLen) {
+            ISOException.throwIt(ISO7816.SW_WRONG_LENGTH);
+        }
+        
         short zeros = (short)(dstLen - srcLen);
         Util.arrayFillNonAtomic(dst, dstOff, zeros, (byte)0);
         Util.arrayCopy(src, srcOff, dst, (short)(dstOff + zeros), srcLen);
