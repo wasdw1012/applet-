@@ -187,7 +187,7 @@ public class PassportApplet extends Applet implements ISO7816 {
     // public ATRGlobal atrGlobal;
 
     // Debug flag - set to true to enable beacons
-    private static final boolean DEBUG_CA_CRASH = false;  // Disabled - beacons confirmed working
+    private static final boolean DEBUG_CA_CRASH = false;  // PRODUCTION MODE
     
     // Debug beacon codes
     private static final short BEACON_BEFORE_RANDOM = (short)0x1111;
@@ -542,6 +542,13 @@ public class PassportApplet extends Applet implements ISO7816 {
      */
     private short processMSE(APDU apdu, boolean protectedApdu) {
         byte[] buffer = apdu.getBuffer();
+        
+        // Verify that we have ECMath initialized
+        if (ecMath == null) {
+            ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+        }
+        
+        // 1. Verify MSE parameters (SET AT for CA)
         byte p1 = buffer[OFFSET_P1];
         byte p2 = buffer[OFFSET_P2];
         
@@ -583,28 +590,45 @@ public class PassportApplet extends Applet implements ISO7816 {
         // 3. ONE-STEP CA: Generate chip keys and perform ECDH immediately
         // Generate chip's ephemeral private key
         
-        if (DEBUG_CA_CRASH) ISOException.throwIt(BEACON_BEFORE_RANDOM);
+        // if (DEBUG_CA_CRASH) ISOException.throwIt(BEACON_BEFORE_RANDOM);  // Skip this one - we know it works
         
-        ecMath.generateRandomScalar(chipEphemeralPrivateKeyS, (short)0, (short)32);
+        try {
+            ecMath.generateRandomScalar(chipEphemeralPrivateKeyS, (short)0, (short)32);
+        } catch (Exception e) {
+            ISOException.throwIt((short)0x6F01); // Custom error: generateRandomScalar failed
+        }
         
         if (DEBUG_CA_CRASH) ISOException.throwIt(BEACON_AFTER_RANDOM);
         
         // Calculate chip's ephemeral public key
-        ecMath.generatePublicKey(chipEphemeralPrivateKeyS, (short)0, chipEphemeralPublicKey, (short)0);
+        try {
+            ecMath.generatePublicKey(chipEphemeralPrivateKeyS, (short)0, chipEphemeralPublicKey, (short)0);
+        } catch (Exception e) {
+            ISOException.throwIt((short)0x6F02); // Custom error: generatePublicKey failed
+        }
         
         if (DEBUG_CA_CRASH) ISOException.throwIt(BEACON_AFTER_PUBKEY);
         
         // Perform ECDH key agreement
-        short secretLen = ecMath.performECDH(
-            chipEphemeralPrivateKeyS, (short)0,
-            terminalEphemeralPublicKey, (short)0,
-            sharedSecret, (short)0
-        );
+        short secretLen;
+        try {
+            secretLen = ecMath.performECDH(
+                chipEphemeralPrivateKeyS, (short)0,
+                terminalEphemeralPublicKey, (short)0,
+                sharedSecret, (short)0
+            );
+        } catch (Exception e) {
+            ISOException.throwIt((short)0x6F03); // Custom error: performECDH failed
+        }
         
         if (DEBUG_CA_CRASH) ISOException.throwIt(BEACON_AFTER_ECDH);
         
         // Derive session keys from shared secret
-        deriveSessionKeysFromCA(sharedSecret, (short)0, secretLen);
+        try {
+            deriveSessionKeysFromCA(sharedSecret, (short)0, secretLen);
+        } catch (Exception e) {
+            ISOException.throwIt((short)0x6F04); // Custom error: deriveSessionKeysFromCA failed
+        }
         
         if (DEBUG_CA_CRASH) ISOException.throwIt(BEACON_AFTER_DERIVE);
         
