@@ -1111,7 +1111,9 @@ def connect_reader():
         print(f">> Using reader: {reader}")
         connection = reader.createConnection()
         connection.connect()
-        print("[OK] Reader connected successfully")
+        # 设置正确的超时 - 使用setTimeout方法
+        connection.setTimeout(30.0)  # 30秒超时
+        print("[OK] Reader connected successfully (timeout: 30s)")
         return connection
     except Exception as e:
         print(f"[FAIL] Failed to connect to reader: {e}")
@@ -1602,6 +1604,10 @@ def perform_chip_authentication(connection, ks_enc_bac: bytes, ks_mac_bac: bytes
     
     # 记录APDU
     apdu_analyzer.log_command(mse_apdu, "MSE_SET_AT_CA", time.time())
+    
+    # 给卡片一点准备时间，避免EC运算导致的断卡
+    print("[STABILIZE] Pre-MSE delay for card preparation (0.5s)...")
+    time.sleep(0.5)
     
     # 发送并接收响应 - 零重试！
     try:
@@ -2556,9 +2562,7 @@ if __name__ == "__main__":
         # 连接读卡器
         connection = connect_reader()
         
-        # 🚨在这里插入！设置官方超时（单位：秒）
-        # 这是 pyscard 库自带的功能，比自己写线程更稳定！
-        connection.TIMEOUT = 30  # 设置30秒超时
+        # 超时已在connect_reader中设置
         
         # 🚨这里就是最完美的插入点！
         # 【阶段零：机密注入】- 利用绿色通道写入AA私钥
