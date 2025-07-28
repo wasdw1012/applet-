@@ -1,3 +1,19 @@
+"""
+Passport Personalization Tool with Chip Authentication (CA) Support
+
+This tool performs secure passport personalization including:
+- Phase Zero: Secret key injection (AA and CA private keys)
+- Phase One: BAC authentication and file creation
+- Phase Two: CA protocol upgrade for enhanced security
+
+Author: Pro Version with Hardware Stability Features
+Version: 2.0
+
+Note on Timeouts:
+The pyscard library's timeout mechanism is platform and reader dependent.
+Most readers handle long operations internally. Our stability delays
+(HARDWARE_RECOVERY_DELAY) provide the necessary time for EC operations.
+"""
 from smartcard.System import readers
 from smartcard.util import toBytes, toHexString
 from smartcard.CardConnection import CardConnection
@@ -1111,9 +1127,8 @@ def connect_reader():
         print(f">> Using reader: {reader}")
         connection = reader.createConnection()
         connection.connect()
-        # 设置正确的超时 - 使用setTimeout方法
-        connection.setTimeout(30.0)  # 30秒超时
-        print("[OK] Reader connected successfully (timeout: 30s)")
+        # 正确的超时设置方式 - 移除错误的setTimeout调用
+        print("[OK] Reader connected successfully")
         return connection
     except Exception as e:
         print(f"[FAIL] Failed to connect to reader: {e}")
@@ -1609,10 +1624,9 @@ def perform_chip_authentication(connection, ks_enc_bac: bytes, ks_mac_bac: bytes
     print(f"[STABILIZE] Pre-MSE hardware recovery delay ({HARDWARE_RECOVERY_DELAY}s)...")
     time.sleep(HARDWARE_RECOVERY_DELAY)
     
-    # MSE命令涉及ECDH运算，可能需要更长时间，临时增加超时
-    original_timeout = connection.getTimeout() if hasattr(connection, 'getTimeout') else 30.0
-    print(f"[DEBUG] Setting extended timeout for MSE command: 60s (was {original_timeout}s)")
-    connection.setTimeout(60.0)  # MSE专用60秒超时
+    # MSE命令涉及ECDH运算，可能需要更长时间
+    # 注意：pyscard的超时机制依赖于底层PC/SC实现，并非所有读卡器都支持
+    print(f"[DEBUG] MSE command may take longer due to EC operations")
     
     # 发送并接收响应 - 零重试！
     try:
@@ -1628,8 +1642,6 @@ def perform_chip_authentication(connection, ks_enc_bac: bytes, ks_mac_bac: bytes
             raise RuntimeError(f"CA failed, no retry possible: SW={sw:04X}")
             
     except Exception as e:
-        # 确保恢复超时设置
-        connection.setTimeout(original_timeout)
         print(f"[FATAL] CA communication error: {e}")
         print("[FATAL] SSC continuity broken - card must be reset")
         raise
