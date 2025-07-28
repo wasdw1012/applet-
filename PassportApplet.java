@@ -148,6 +148,7 @@ public class PassportApplet extends Applet implements ISO7816 {
     private byte[] ssc;
 
     private byte[] documentNumber;
+    private static final short MAX_DOCUMENT_NUMBER_LENGTH = 10; // 9 digits + 1 check digit
     
     // CA related members
     private ECMath ecMath;
@@ -229,6 +230,9 @@ public class PassportApplet extends Applet implements ISO7816 {
         tempKdfInput = JCSystem.makeTransientByteArray((short)36, JCSystem.CLEAR_ON_DESELECT);     // 32 bytes shared secret + 4 bytes counter
         tempHashOutput = JCSystem.makeTransientByteArray((short)32, JCSystem.CLEAR_ON_DESELECT);   // SHA-256 output
         tempKeyMaterial = JCSystem.makeTransientByteArray((short)32, JCSystem.CLEAR_ON_DESELECT);  // For derived keys
+        
+        // Initialize documentNumber as persistent array (needs to survive card reset)
+        documentNumber = new byte[MAX_DOCUMENT_NUMBER_LENGTH];
     }
 
     /**
@@ -474,7 +478,15 @@ public class PassportApplet extends Applet implements ISO7816 {
             short doeLength = BERTLVScanner.valueLength;
             buffer_p = BERTLVScanner.skipValue();
 
-            documentNumber = new byte[(short)(docNrLength+1)];
+            // Check document number length doesn't exceed maximum
+            if ((short)(docNrLength + 1) > MAX_DOCUMENT_NUMBER_LENGTH) {
+                ISOException.throwIt(SW_WRONG_LENGTH);
+            }
+            
+            // Clear the documentNumber array first
+            Util.arrayFillNonAtomic(documentNumber, (short)0, MAX_DOCUMENT_NUMBER_LENGTH, (byte)0);
+            
+            // Copy document number and add check digit
             Util.arrayCopyNonAtomic(buffer, docNrOffset, documentNumber,
                     (short) 0, docNrLength);
             documentNumber[docNrLength] = PassportInit.checkDigit(documentNumber,(short)0, docNrLength);
