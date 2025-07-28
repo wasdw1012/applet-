@@ -1004,7 +1004,7 @@ class UnifiedCertChainGenerator:
             print(f"      警告: 无法提取S值 - {e}")
             
 
-    def encode_length(length: int) -> bytes:
+    def encode_length(self, length: int) -> bytes:
         """
         编码BER-TLV长度字段
         """
@@ -1051,7 +1051,7 @@ class UnifiedCertChainGenerator:
             key_id_tlv
         )
         # 用SEQUENCE(0x30)封装 *内容*，得到一个完整的SecurityInfo对象
-        chip_auth_public_key_info = bytes([0x30]) + encode_length(len(chip_auth_public_key_info_content)) + chip_auth_public_key_info_content
+        chip_auth_public_key_info = bytes([0x30]) + self.encode_length(len(chip_auth_public_key_info_content)) + chip_auth_public_key_info_content
         
         # 6. 构建 ChipAuthenticationInfo 的 *内容*
         chip_auth_info_content = (
@@ -1059,14 +1059,14 @@ class UnifiedCertChainGenerator:
             chip_auth_info_version_tlv
         )
         # 用SEQUENCE(0x30)封装 *内容*
-        chip_auth_info = bytes([0x30]) + encode_length(len(chip_auth_info_content)) + chip_auth_info_content
+        chip_auth_info = bytes([0x30]) + self.encode_length(len(chip_auth_info_content)) + chip_auth_info_content
         
         # 7. SecurityInfos SET
         security_infos_content = chip_auth_public_key_info + chip_auth_info
-        security_infos = bytes([0x31]) + encode_length(len(security_infos_content)) + security_infos_content
+        security_infos = bytes([0x31]) + self.encode_length(len(security_infos_content)) + security_infos_content
         
         # 8. DG14
-        dg14 = bytes([0x6E]) + encode_length(len(security_infos)) + security_infos
+        dg14 = bytes([0x6E]) + self.encode_length(len(security_infos)) + security_infos
         
         # 9. 保存
         filename = "DG14.bin"
