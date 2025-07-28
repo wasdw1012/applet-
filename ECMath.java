@@ -279,15 +279,15 @@ public class ECMath {
         // tmp4 = tmp2 / tmp3 = lambda
         modDiv(tmp2, tmp3, tmp4);
         
-        // x3 = lambda^2 - 2*x1
-        modSquare(tmp4, tmp5);
-        modAdd(x1Full, x1Full, tmp3);
-        modSub(tmp5, tmp3, tmp5);
-        
-        // y3 = lambda*(x1 - x3) - y1
-        modSub(x1Full, tmp5, tmp6);
-        modMul(tmp4, tmp6, tmp3);
-        modSub(tmp3, y1Full, tmp6);
+		// x3 = lambda^2 - 2*x1
+		modSquare(tmp4, tmp5);
+		modAdd(tempFull1, tempFull1, tmp3);  // x1Full  tempFull1
+		modSub(tmp5, tmp3, tmp5);
+
+		// y3 = lambda*(x1 - x3) - y1
+		modSub(tempFull1, tmp5, tmp6);       // x1Full  tempFull1
+		modMul(tmp4, tmp6, tmp3);
+		modSub(tmp3, tempFull2, tmp6);       // y1Full  tempFull2
         
         // Copy results back to 33-byte format
         Util.arrayCopy(tmp5, (short)(RSA_BLOCK_SIZE - BIGNAT_SIZE), x3, (short)0, BIGNAT_SIZE);
