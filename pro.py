@@ -1605,13 +1605,21 @@ def perform_chip_authentication(connection, ks_enc_bac: bytes, ks_mac_bac: bytes
     # 记录APDU
     apdu_analyzer.log_command(mse_apdu, "MSE_SET_AT_CA", time.time())
     
-    # 给卡片一点准备时间，避免EC运算导致的断卡
-    print("[STABILIZE] Pre-MSE delay for card preparation (0.5s)...")
-    time.sleep(0.5)
+    # 使用折磨版的硬件恢复延迟，MSE涉及大量EC运算
+    print(f"[STABILIZE] Pre-MSE hardware recovery delay ({HARDWARE_RECOVERY_DELAY}s)...")
+    time.sleep(HARDWARE_RECOVERY_DELAY)
+    
+    # MSE命令涉及ECDH运算，可能需要更长时间，临时增加超时
+    original_timeout = connection.getTimeout() if hasattr(connection, 'getTimeout') else 30.0
+    print(f"[DEBUG] Setting extended timeout for MSE command: 60s (was {original_timeout}s)")
+    connection.setTimeout(60.0)  # MSE专用60秒超时
     
     # 发送并接收响应 - 零重试！
     try:
         response_data, sw = send_apdu(connection, mse_apdu, "MSE_SET_AT_CA")
+        
+        # 恢复原始超时
+        connection.setTimeout(original_timeout)
         
         if sw != 0x9000:
             print(f"[FATAL] MSE:SET AT failed: SW={sw:04X}")
@@ -1620,6 +1628,8 @@ def perform_chip_authentication(connection, ks_enc_bac: bytes, ks_mac_bac: bytes
             raise RuntimeError(f"CA failed, no retry possible: SW={sw:04X}")
             
     except Exception as e:
+        # 确保恢复超时设置
+        connection.setTimeout(original_timeout)
         print(f"[FATAL] CA communication error: {e}")
         print("[FATAL] SSC continuity broken - card must be reset")
         raise
