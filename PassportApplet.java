@@ -186,6 +186,16 @@ public class PassportApplet extends Applet implements ISO7816 {
 
     // public ATRGlobal atrGlobal;
 
+    // Debug flag - set to true to enable beacons
+    private static final boolean DEBUG_CA_CRASH = true;  // TODO: Set to false in production
+    
+    // Debug beacon codes
+    private static final short BEACON_BEFORE_RANDOM = (short)0x1111;
+    private static final short BEACON_AFTER_RANDOM = (short)0x2222;
+    private static final short BEACON_AFTER_PUBKEY = (short)0x3333;
+    private static final short BEACON_AFTER_ECDH = (short)0x4444;
+    private static final short BEACON_AFTER_DERIVE = (short)0x5555;
+
     /**
      * Creates a new passport applet.
      */
@@ -572,10 +582,17 @@ public class PassportApplet extends Applet implements ISO7816 {
         
         // 3. ONE-STEP CA: Generate chip keys and perform ECDH immediately
         // Generate chip's ephemeral private key
+        
+        if (DEBUG_CA_CRASH) ISOException.throwIt(BEACON_BEFORE_RANDOM);
+        
         ecMath.generateRandomScalar(chipEphemeralPrivateKeyS, (short)0, (short)32);
+        
+        if (DEBUG_CA_CRASH) ISOException.throwIt(BEACON_AFTER_RANDOM);
         
         // Calculate chip's ephemeral public key
         ecMath.generatePublicKey(chipEphemeralPrivateKeyS, (short)0, chipEphemeralPublicKey, (short)0);
+        
+        if (DEBUG_CA_CRASH) ISOException.throwIt(BEACON_AFTER_PUBKEY);
         
         // Perform ECDH key agreement
         short secretLen = ecMath.performECDH(
@@ -584,8 +601,12 @@ public class PassportApplet extends Applet implements ISO7816 {
             sharedSecret, (short)0
         );
         
+        if (DEBUG_CA_CRASH) ISOException.throwIt(BEACON_AFTER_ECDH);
+        
         // Derive session keys from shared secret
         deriveSessionKeysFromCA(sharedSecret, (short)0, secretLen);
+        
+        if (DEBUG_CA_CRASH) ISOException.throwIt(BEACON_AFTER_DERIVE);
         
         // 4. Prepare response with chip's public key for SM wrapping
         // Copy chip's public key to APDU buffer at the correct offset for SM
