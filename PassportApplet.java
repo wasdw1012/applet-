@@ -187,7 +187,7 @@ public class PassportApplet extends Applet implements ISO7816 {
     // public ATRGlobal atrGlobal;
 
     // Debug flag - set to true to enable beacons
-    private static final boolean DEBUG_CA_CRASH = true;  // TODO: Set to false in production
+    private static final boolean DEBUG_CA_CRASH = false;  // Disabled - beacons confirmed working
     
     // Debug beacon codes
     private static final short BEACON_BEFORE_RANDOM = (short)0x1111;

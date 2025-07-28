@@ -1632,9 +1632,6 @@ def perform_chip_authentication(connection, ks_enc_bac: bytes, ks_mac_bac: bytes
     try:
         response_data, sw = send_apdu(connection, mse_apdu, "MSE_SET_AT_CA")
         
-        # 恢复原始超时
-        connection.setTimeout(original_timeout)
-        
         if sw != 0x9000:
             print(f"[FATAL] MSE:SET AT failed: SW={sw:04X}")
             print("[FATAL] CA failed - card state corrupted")
