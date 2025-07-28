@@ -73,6 +73,12 @@ public class ECMath {
     // Temporary arrays for RSA operations
     private byte[] rsaBuffer;
     
+    // Additional temporary buffers to avoid dynamic allocation in methods
+    private byte[] tempFull1;  // For pointDouble/pointAdd x1Full
+    private byte[] tempFull2;  // For pointDouble/pointAdd y1Full
+    private byte[] tempFull3;  // For pointAdd x2Full
+    private byte[] tempFull4;  // For pointAdd y2Full
+    
     // Error codes
     public static final short SW_INVALID_POINT_FORMAT = (short)0x6A86;
     public static final short SW_INVALID_KEY_LENGTH = (short)0x6A88;
@@ -102,6 +108,12 @@ public class ECMath {
         pointY3 = JCSystem.makeTransientByteArray(BIGNAT_SIZE, JCSystem.CLEAR_ON_DESELECT);
         
         rsaBuffer = JCSystem.makeTransientByteArray(RSA_BLOCK_SIZE, JCSystem.CLEAR_ON_DESELECT);
+        
+        // Initialize additional temporary buffers
+        tempFull1 = JCSystem.makeTransientByteArray(RSA_BLOCK_SIZE, JCSystem.CLEAR_ON_DESELECT);
+        tempFull2 = JCSystem.makeTransientByteArray(RSA_BLOCK_SIZE, JCSystem.CLEAR_ON_DESELECT);
+        tempFull3 = JCSystem.makeTransientByteArray(RSA_BLOCK_SIZE, JCSystem.CLEAR_ON_DESELECT);
+        tempFull4 = JCSystem.makeTransientByteArray(RSA_BLOCK_SIZE, JCSystem.CLEAR_ON_DESELECT);
         
         // Initialize RSA engine for modular arithmetic
         try {
@@ -234,13 +246,12 @@ public class ECMath {
         }
         
         // Convert point coordinates to RSA_BLOCK_SIZE for modular operations
-        byte[] x1Full = new byte[RSA_BLOCK_SIZE];
-        byte[] y1Full = new byte[RSA_BLOCK_SIZE];
-        prependZeros(x1, (short)0, BIGNAT_SIZE, x1Full, (short)0, RSA_BLOCK_SIZE);
-        prependZeros(y1, (short)0, BIGNAT_SIZE, y1Full, (short)0, RSA_BLOCK_SIZE);
+        // Use pre-allocated buffers instead of dynamic allocation
+        prependZeros(x1, (short)0, BIGNAT_SIZE, tempFull1, (short)0, RSA_BLOCK_SIZE);
+        prependZeros(y1, (short)0, BIGNAT_SIZE, tempFull2, (short)0, RSA_BLOCK_SIZE);
         
         // tmp1 = x1^2
-        modSquare(x1Full, tmp1);
+        modSquare(tempFull1, tmp1);
         
         // tmp2 = 3 * x1^2
         copyBignat(tmp1, tmp2);
@@ -248,12 +259,12 @@ public class ECMath {
         modAdd(tmp2, tmp1, tmp2);
         
         // tmp2 = 3*x1^2 + a (where a = P256_A = p-3)
-        byte[] aValue = new byte[RSA_BLOCK_SIZE];
-        prependZeros(P256_A, (short)0, COORD_SIZE, aValue, (short)0, RSA_BLOCK_SIZE);
-        modAdd(tmp2, aValue, tmp2);
+        // Use tempFull3 for aValue instead of dynamic allocation
+        prependZeros(P256_A, (short)0, COORD_SIZE, tempFull3, (short)0, RSA_BLOCK_SIZE);
+        modAdd(tmp2, tempFull3, tmp2);
         
         // tmp3 = 2*y1
-        modAdd(y1Full, y1Full, tmp3);
+        modAdd(tempFull2, tempFull2, tmp3);
         
         // tmp4 = tmp2 / tmp3 = lambda
         modDiv(tmp2, tmp3, tmp4);
@@ -300,29 +311,26 @@ public class ECMath {
         }
         
         // Convert to full size
-        byte[] x1Full = new byte[RSA_BLOCK_SIZE];
-        byte[] y1Full = new byte[RSA_BLOCK_SIZE];
-        byte[] x2Full = new byte[RSA_BLOCK_SIZE];
-        byte[] y2Full = new byte[RSA_BLOCK_SIZE];
-        prependZeros(x1, (short)0, BIGNAT_SIZE, x1Full, (short)0, RSA_BLOCK_SIZE);
-        prependZeros(y1, (short)0, BIGNAT_SIZE, y1Full, (short)0, RSA_BLOCK_SIZE);
-        prependZeros(x2, (short)0, BIGNAT_SIZE, x2Full, (short)0, RSA_BLOCK_SIZE);
-        prependZeros(y2, (short)0, BIGNAT_SIZE, y2Full, (short)0, RSA_BLOCK_SIZE);
+        // Use pre-allocated buffers instead of dynamic allocation
+        prependZeros(x1, (short)0, BIGNAT_SIZE, tempFull1, (short)0, RSA_BLOCK_SIZE);
+        prependZeros(y1, (short)0, BIGNAT_SIZE, tempFull2, (short)0, RSA_BLOCK_SIZE);
+        prependZeros(x2, (short)0, BIGNAT_SIZE, tempFull3, (short)0, RSA_BLOCK_SIZE);
+        prependZeros(y2, (short)0, BIGNAT_SIZE, tempFull4, (short)0, RSA_BLOCK_SIZE);
         
         // lambda = (y2 - y1) / (x2 - x1)
-        modSub(y2Full, y1Full, tmp1);
-        modSub(x2Full, x1Full, tmp2);
+        modSub(tempFull4, tempFull2, tmp1);
+        modSub(tempFull3, tempFull1, tmp2);
         modDiv(tmp1, tmp2, tmp3);
         
         // x3 = lambda^2 - x1 - x2
         modSquare(tmp3, tmp4);
-        modSub(tmp4, x1Full, tmp5);
-        modSub(tmp5, x2Full, tmp5);
+        modSub(tmp4, tempFull1, tmp5);
+        modSub(tmp5, tempFull3, tmp5);
         
         // y3 = lambda*(x1 - x3) - y1
-        modSub(x1Full, tmp5, tmp4);
+        modSub(tempFull1, tmp5, tmp4);
         modMul(tmp3, tmp4, tmp6);
-        modSub(tmp6, y1Full, tmp6);
+        modSub(tmp6, tempFull2, tmp6);
         
         // Copy results back
         Util.arrayCopy(tmp5, (short)(RSA_BLOCK_SIZE - BIGNAT_SIZE), x3, (short)0, BIGNAT_SIZE);
@@ -655,31 +663,30 @@ public class ECMath {
         }
         
         // Convert to full size for calculations
-        byte[] xFull = new byte[RSA_BLOCK_SIZE];
-        byte[] yFull = new byte[RSA_BLOCK_SIZE];
-        prependZeros(x, (short)0, BIGNAT_SIZE, xFull, (short)0, RSA_BLOCK_SIZE);
-        prependZeros(y, (short)0, BIGNAT_SIZE, yFull, (short)0, RSA_BLOCK_SIZE);
+        // Use pre-allocated buffers instead of dynamic allocation
+        prependZeros(x, (short)0, BIGNAT_SIZE, tempFull1, (short)0, RSA_BLOCK_SIZE);
+        prependZeros(y, (short)0, BIGNAT_SIZE, tempFull2, (short)0, RSA_BLOCK_SIZE);
         
         // Calculate left side: y^2
-        modSquare(yFull, tmp1);
+        modSquare(tempFull2, tmp1);
         
         // Calculate right side: x^3 + ax + b
         // First: x^3
-        modSquare(xFull, tmp2);
-        modMul(tmp2, xFull, tmp3);
+        modSquare(tempFull1, tmp2);
+        modMul(tmp2, tempFull1, tmp3);
         
         // Then: ax (where a = P256_A)
-        byte[] aValue = new byte[RSA_BLOCK_SIZE];
-        prependZeros(P256_A, (short)0, COORD_SIZE, aValue, (short)0, RSA_BLOCK_SIZE);
-        modMul(xFull, aValue, tmp2);
+        // Use tempFull3 for aValue instead of dynamic allocation
+        prependZeros(P256_A, (short)0, COORD_SIZE, tempFull3, (short)0, RSA_BLOCK_SIZE);
+        modMul(tempFull1, tempFull3, tmp2);
         
         // Add: x^3 + ax
         modAdd(tmp3, tmp2, tmp4);
         
         // Finally add b: x^3 + ax + b
-        byte[] bValue = new byte[RSA_BLOCK_SIZE];
-        prependZeros(P256_B, (short)0, COORD_SIZE, bValue, (short)0, RSA_BLOCK_SIZE);
-        modAdd(tmp4, bValue, tmp2);
+        // Use tempFull4 for bValue instead of dynamic allocation
+        prependZeros(P256_B, (short)0, COORD_SIZE, tempFull4, (short)0, RSA_BLOCK_SIZE);
+        modAdd(tmp4, tempFull4, tmp2);
         
         // Compare y^2 with x^3 + ax + b
         return isEqual(tmp1, tmp2);
