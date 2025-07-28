@@ -156,6 +156,11 @@ public class PassportApplet extends Applet implements ISO7816 {
     private byte[] chipEphemeralPrivateKeyS;  // Chip's ephemeral private key (32 bytes)
     private byte[] chipEphemeralPublicKey;  // Chip's ephemeral public key (65 bytes)
     private byte[] sharedSecret;  // ECDH shared secret (32 bytes)
+    
+    // Step 1: Move temporary arrays from deriveSessionKeysFromCA to class members
+    private byte[] tempKdfInput;      // For KDF input: shared secret + counter
+    private byte[] tempHashOutput;    // For SHA-256 output
+    private byte[] tempKeyMaterial;   // For derived key material
 
     private FileSystem fileSystem;
 
@@ -219,6 +224,11 @@ public class PassportApplet extends Applet implements ISO7816 {
         chipEphemeralPrivateKeyS = JCSystem.makeTransientByteArray((short)32, JCSystem.CLEAR_ON_DESELECT);
         chipEphemeralPublicKey = JCSystem.makeTransientByteArray((short)65, JCSystem.CLEAR_ON_DESELECT);
         sharedSecret = JCSystem.makeTransientByteArray((short)32, JCSystem.CLEAR_ON_DESELECT);
+        
+        // Step 2: Initialize temporary arrays in constructor using makeTransientByteArray
+        tempKdfInput = JCSystem.makeTransientByteArray((short)36, JCSystem.CLEAR_ON_DESELECT);     // 32 bytes shared secret + 4 bytes counter
+        tempHashOutput = JCSystem.makeTransientByteArray((short)32, JCSystem.CLEAR_ON_DESELECT);   // SHA-256 output
+        tempKeyMaterial = JCSystem.makeTransientByteArray((short)32, JCSystem.CLEAR_ON_DESELECT);  // For derived keys
     }
 
     /**
@@ -613,55 +623,57 @@ public class PassportApplet extends Applet implements ISO7816 {
         // KDF input: sharedSecret || counter
         // counter is 4 bytes: 0x00000001 for K_enc, 0x00000002 for K_mac
         
-        byte[] kdfInput = new byte[(short)(length + 4)];
-        byte[] hashOutput = new byte[32]; // SHA-256 output
+        // Step 3: Remove local array declarations - use class members instead
+        // byte[] kdfInput = new byte[(short)(length + 4)];  // REMOVED
+        // byte[] hashOutput = new byte[32];                 // REMOVED
+        // byte[] keyMaterial = new byte[32];                // REMOVED
         
         // Copy shared secret to KDF input
-        Util.arrayCopy(sharedSecret, offset, kdfInput, (short)0, length);
+        Util.arrayCopy(sharedSecret, offset, tempKdfInput, (short)0, length);
         
         // Set counter bytes position
-        kdfInput[length] = (byte)0x00;
-        kdfInput[(short)(length + 1)] = (byte)0x00;
-        kdfInput[(short)(length + 2)] = (byte)0x00;
+        tempKdfInput[length] = (byte)0x00;
+        tempKdfInput[(short)(length + 1)] = (byte)0x00;
+        tempKdfInput[(short)(length + 2)] = (byte)0x00;
         
         // For 3DES keys, we need:
         // - K_enc: 16 bytes (112-bit 3DES key)
         // - K_mac: 16 bytes (112-bit 3DES key)
         
-        // Temporary storage for both keys
-        byte[] keyMaterial = new byte[32];
-        
         // First derive encryption key with counter = 1
-        kdfInput[(short)(length + 3)] = (byte)0x01;
+        tempKdfInput[(short)(length + 3)] = (byte)0x01;
         crypto.shaDigest.reset();
-        crypto.shaDigest.doFinal(kdfInput, (short)0, (short)(length + 4), hashOutput, (short)0);
+        crypto.shaDigest.doFinal(tempKdfInput, (short)0, (short)(length + 4), tempHashOutput, (short)0);
         
         // Take first 16 bytes for K_enc
-        Util.arrayCopy(hashOutput, (short)0, keyMaterial, (short)0, (short)16);
+        Util.arrayCopy(tempHashOutput, (short)0, tempKeyMaterial, (short)0, (short)16);
         
         // Now derive MAC key with counter = 2
-        kdfInput[(short)(length + 3)] = (byte)0x02;
+        tempKdfInput[(short)(length + 3)] = (byte)0x02;
         crypto.shaDigest.reset();
-        crypto.shaDigest.doFinal(kdfInput, (short)0, (short)(length + 4), hashOutput, (short)0);
+        crypto.shaDigest.doFinal(tempKdfInput, (short)0, (short)(length + 4), tempHashOutput, (short)0);
         
         // Take first 16 bytes for K_mac
-        Util.arrayCopy(hashOutput, (short)0, keyMaterial, (short)16, (short)16);
+        Util.arrayCopy(tempHashOutput, (short)0, tempKeyMaterial, (short)16, (short)16);
         
         // Apply parity bit adjustment for 3DES keys
         // Each byte must have odd parity (odd number of 1 bits)
         for (short i = 0; i < 32; i++) {
-            if (PassportUtil.evenBits(keyMaterial[i]) == 0) {
-                keyMaterial[i] = (byte)(keyMaterial[i] ^ 1);
+            if (PassportUtil.evenBits(tempKeyMaterial[i]) == 0) {
+                tempKeyMaterial[i] = (byte)(tempKeyMaterial[i] ^ 1);
             }
         }
         
         // Set both keys: K_mac at offset 16, K_enc at offset 0
-        keyStore.setSecureMessagingKeys(keyMaterial, (short)16, keyMaterial, (short)0);
+        keyStore.setSecureMessagingKeys(tempKeyMaterial, (short)16, tempKeyMaterial, (short)0);
         
-        // Clear sensitive data
-        Util.arrayFillNonAtomic(kdfInput, (short)0, (short)kdfInput.length, (byte)0);
-        Util.arrayFillNonAtomic(hashOutput, (short)0, (short)hashOutput.length, (byte)0);
-        Util.arrayFillNonAtomic(keyMaterial, (short)0, (short)keyMaterial.length, (byte)0);
+        // Step 3: Remove manual clearing - transient arrays auto-clear on deselect
+        // The following lines are no longer needed:
+        // Util.arrayFillNonAtomic(kdfInput, (short)0, (short)kdfInput.length, (byte)0);    // REMOVED
+        // Util.arrayFillNonAtomic(hashOutput, (short)0, (short)hashOutput.length, (byte)0);  // REMOVED
+        // Util.arrayFillNonAtomic(keyMaterial, (short)0, (short)keyMaterial.length, (byte)0);  // REMOVED
+        
+        // Still clear the input shared secret for security
         Util.arrayFillNonAtomic(sharedSecret, (short)0, (short)sharedSecret.length, (byte)0);
     }
 
