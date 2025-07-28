@@ -11,6 +11,9 @@ import sys
 import threading
 import traceback
 from datetime import datetime, timedelta
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.backends import default_backend
 
 # 只要有这个🚨emoji就是重点核心优化和解决方案，死都不能碰！🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨
 
@@ -22,6 +25,7 @@ class APDUAnalyzer:
         self.responses = []  # 完整响应历史
         self.timing_data = []  # 时序分析数据
         self.data_chunks = {}  # 块数据重组
+        self.ca_transition_info = None  # CA转换信息
         self.statistics = {
             'total_commands': 0,
             'total_bytes_sent': 0,
@@ -266,6 +270,37 @@ class APDUAnalyzer:
                 report += "│   │\n"
         else:
             report += "├── ！ No AA Key Operations Found in Session\n"
+        
+        # 🔐 CA转换分析
+        if self.ca_transition_info:
+            report += f"\n🔐 CHIP AUTHENTICATION (CA) ANALYSIS:\n"
+            report += f"├── CA Execution Time: {self.ca_transition_info['duration']:.2f}s\n"
+            report += f"├── Timestamp: {datetime.fromtimestamp(self.ca_transition_info['timestamp']).strftime('%H:%M:%S.%f')[:-3]}\n"
+            report += f"├── SSC Transition:\n"
+            report += f"│   ├── Before CA (BAC): {self.ca_transition_info['ssc_before']}\n"
+            report += f"│   └── After CA (Reset): {self.ca_transition_info['ssc_after']}\n"
+            report += f"├── Key Switch: {'✓ SUCCESS' if self.ca_transition_info['key_switched'] else '× FAILED'}\n"
+            
+            # 分析CA前后的操作
+            ca_time = self.ca_transition_info['timestamp']
+            ops_before_ca = [cmd for cmd in self.commands if cmd['timestamp'] < ca_time]
+            ops_after_ca = [cmd for cmd in self.commands if cmd['timestamp'] > ca_time]
+            
+            report += f"├── Operations before CA: {len(ops_before_ca)}\n"
+            report += f"├── Operations after CA: {len(ops_after_ca)}\n"
+            
+            # 列出CA前的关键操作
+            report += f"│   ├── Pre-CA operations (using BAC keys):\n"
+            ca_prereq_ops = [cmd for cmd in ops_before_ca if 'COM' in cmd['operation'] or 'DG14' in cmd['operation']]
+            for op in ca_prereq_ops:
+                report += f"│   │   ├── {op['operation']}\n"
+            
+            # 列出CA后的操作
+            report += f"│   └── Post-CA operations (using CA keys):\n"
+            for i, op in enumerate(ops_after_ca[:5]):  # 显示前5个
+                report += f"│       ├── {op['operation']}\n"
+            if len(ops_after_ca) > 5:
+                report += f"│       └── ... and {len(ops_after_ca) - 5} more\n"
             
         #  完整操作序列（前20个操作）
         report += f"\n COMPLETE OPERATION SEQUENCE (First 20):\n"
@@ -1279,6 +1314,21 @@ def increment_ssc(ssc: bytearray):
             break
         ssc[i] = 0
 
+def adjust_des_parity(key: bytes) -> bytes:
+    """
+    调整3DES密钥的奇偶校验位
+    每个字节必须有奇数个1位
+    """
+    adjusted = bytearray(key)
+    for i in range(len(adjusted)):
+        byte = adjusted[i]
+        # 计算字节中1的个数
+        ones_count = bin(byte).count('1')
+        # 如果是偶数，翻转最低位
+        if ones_count % 2 == 0:
+            adjusted[i] ^= 0x01
+    return bytes(adjusted)
+
 def mac_iso9797_alg3(data: bytes, key: bytes) -> bytes:
     """ISO/IEC 9797-1 MAC Algorithm 3, Method 2 padding.
 
@@ -1511,6 +1561,124 @@ def perform_bac_authentication(connection, mrz_data: bytes) -> tuple[bytes, byte
     print(f"[OK] BAC认证成功，会话密钥已建立")
     
     return ks_enc, ks_mac, ssc
+
+
+def perform_chip_authentication(connection, ks_enc_bac: bytes, ks_mac_bac: bytes, ssc_bac: bytearray) -> tuple[bytes, bytes, bytearray]:
+    """
+    执行芯片认证(CA) - 一步模式
+    返回新的CA会话密钥和重置的SSC
+    """
+    print("\n" + "="*60)
+    print(">> CHIP AUTHENTICATION (CA) STARTING")
+    print("="*60)
+    
+    # 记录CA开始时的状态
+    ca_start_time = time.time()
+    initial_ssc = ssc_bac.hex()
+    
+    # 1. 生成终端临时密钥对 (P-256)
+    print("-> Generating terminal ephemeral key pair...")
+    private_key = ec.generate_private_key(ec.SECP256R1(), default_backend())
+    public_key = private_key.public_key()
+    
+    # 获取公钥的未压缩格式 (65字节: 0x04 + X + Y)
+    public_key_bytes = public_key.public_bytes(
+        encoding=serialization.Encoding.X962,
+        format=serialization.PublicFormat.UncompressedPoint
+    )
+    
+    if DEBUG_MODE:
+        print(f"[DEBUG] Terminal ephemeral public key ({len(public_key_bytes)} bytes):")
+        print(f"[DEBUG] {public_key_bytes.hex().upper()}")
+    
+    print("-> Sending MSE:SET AT with terminal public key...")
+    
+    # 2. 构建MSE:SET AT数据（Tag 0x91）
+    mse_data = bytes([0x91, 0x41]) + public_key_bytes
+    
+    # 3. 使用当前BAC密钥发送MSE命令
+    print(f"[DEBUG] SSC before MSE: {ssc_bac.hex()}")
+    mse_apdu = build_sm_apdu(0x0C, 0x22, 0x41, 0xA6, mse_data, 0, ks_enc_bac, ks_mac_bac, ssc_bac)
+    
+    # 记录APDU
+    apdu_analyzer.log_command(mse_apdu, "MSE_SET_AT_CA", time.time())
+    
+    # 发送并接收响应 - 零重试！
+    try:
+        response_data, sw = send_apdu(connection, mse_apdu, "MSE_SET_AT_CA")
+        
+        if sw != 0x9000:
+            print(f"[FATAL] MSE:SET AT failed: SW={sw:04X}")
+            print("[FATAL] CA failed - card state corrupted")
+            print("[FATAL] Remove card immediately!")
+            raise RuntimeError(f"CA failed, no retry possible: SW={sw:04X}")
+            
+    except Exception as e:
+        print(f"[FATAL] CA communication error: {e}")
+        print("[FATAL] SSC continuity broken - card must be reset")
+        raise
+    
+    # 4. 解析SM响应获取卡片公钥（一步CA模式）
+    chip_public_key, _ = parse_sm_response(response_data, ks_enc_bac, ks_mac_bac, ssc_bac)
+    
+    print(f"[OK] Received chip ephemeral public key: {len(chip_public_key)} bytes")
+    if DEBUG_MODE:
+        print(f"[DEBUG] Chip public key: {chip_public_key.hex().upper()}")
+    
+    # 5. 执行ECDH密钥协商
+    print("-> Performing ECDH key agreement...")
+    
+    # 将卡片公钥转换为EC点
+    chip_public_key_obj = ec.EllipticCurvePublicKey.from_encoded_point(
+        ec.SECP256R1(), 
+        chip_public_key
+    )
+    
+    # 执行ECDH
+    shared_secret = private_key.exchange(ec.ECDH(), chip_public_key_obj)
+    
+    if DEBUG_MODE:
+        print(f"[DEBUG] Shared secret ({len(shared_secret)} bytes): {shared_secret.hex().upper()}")
+    
+    print("-> Deriving CA session keys...")
+    
+    # 6. KDF派生新会话密钥
+    # SHA-256(shared_secret || counter)
+    kdf_enc_input = shared_secret + bytes([0x00, 0x00, 0x00, 0x01])
+    kdf_mac_input = shared_secret + bytes([0x00, 0x00, 0x00, 0x02])
+    
+    kdf_enc_output = hashlib.sha256(kdf_enc_input).digest()[:16]
+    kdf_mac_output = hashlib.sha256(kdf_mac_input).digest()[:16]
+    
+    # 7. 3DES奇偶校验调整（关键！）
+    ks_enc_ca = adjust_des_parity(kdf_enc_output)
+    ks_mac_ca = adjust_des_parity(kdf_mac_output)
+    
+    # 8. SSC重置为全零（关键！）
+    ssc_ca = bytearray(8)
+    
+    # 记录CA完成信息
+    ca_elapsed = time.time() - ca_start_time
+    
+    print(f"[OK] CA completed successfully in {ca_elapsed:.2f}s")
+    print(f"[DEBUG] New KS_ENC_CA: {ks_enc_ca.hex()}")
+    print(f"[DEBUG] New KS_MAC_CA: {ks_mac_ca.hex()}")
+    print(f"[DEBUG] New SSC (reset): {ssc_ca.hex()}")
+    
+    # 添加到APDU分析报告
+    apdu_analyzer.ca_transition_info = {
+        'timestamp': time.time(),
+        'duration': ca_elapsed,
+        'ssc_before': initial_ssc,
+        'ssc_after': ssc_ca.hex(),
+        'key_switched': True
+    }
+    
+    print("="*60)
+    print(">> CA SECURITY CHANNEL ESTABLISHED")
+    print("="*60)
+    
+    return ks_enc_ca, ks_mac_ca, ssc_ca
 
 
 def build_sm_apdu(cla: int, ins: int, p1: int, p2: int, data: bytes, le: int, ks_enc: bytes, ks_mac: bytes, ssc: bytearray) -> bytes:
@@ -1993,10 +2161,10 @@ def verify_file_data(connection, fid: int, file_path: str, ks_enc: bytes, ks_mac
         print(f"[FAIL] Modern verification failed for {hex(fid)}: {e}")
         return False
 
-def personalize_passport(doc_nr: str, dob: str, doe: str, com_path: str, dg1_path: str, dg2_path: str, dg11_path: str, dg12_path: str, dg14_path: str, dg15_path: str, sod_path: str = None, aid: str = "A0 00 00 02 47 10 01", connection=None):
-    """个人化流程"""
+def personalize_passport_with_ca(doc_nr: str, dob: str, doe: str, com_path: str, dg1_path: str, dg2_path: str, dg11_path: str, dg12_path: str, dg14_path: str, dg15_path: str, sod_path: str = None, aid: str = "A0 00 00 02 47 10 01", connection=None):
+    """增强版个人化流程 - 包含CA切换"""
     print("\n" + "="*60)
-    print(">> PASSPORT PERSONALIZATION STARTING")
+    print(">> PASSPORT PERSONALIZATION WITH CA - STARTING")
     print("="*60)
     
     start_time = time.time()
@@ -2179,29 +2347,108 @@ def personalize_passport(doc_nr: str, dob: str, doe: str, com_path: str, dg1_pat
                 print(f"[OK] Created {name} ({size} bytes)")
 
 
-        print("\n>> Writing passport data...")
-        file_data = [
-            (0x011E, com_path, "COM"),
-            (0x0101, dg1_path, "DG1"),
-            (0x0102, dg2_path, "DG2"),
-            (0x010B, dg11_path, "DG11"),
-            (0x010C, dg12_path, "DG12"),
-            (0x010E, dg14_path, "DG14"),
-            (0x010F, dg15_path, "DG15"),
-            (0x011D, sod_path, "SOD"),
-        ]
+        print("\n" + "="*60)
+        print(">> PHASE 1: Writing CA prerequisite files with BAC keys")
+        print("="*60)
         
         written_total = 0
         progress.set_total(total_bytes, "Writing passport data")
         
-        for fid, file_path, name in file_data:
+        # 先写入COM和DG14（使用BAC密钥）
+        print("\n>> Writing COM with BAC keys...")
+        print(f"[DEBUG] Current security context: BAC")
+        print(f"[DEBUG] SSC before COM write: {ssc.hex()}")
+        
+        # SELECT COM
+        apdu = build_sm_apdu(0x0C, 0xA4, 0x00, 0x00, struct.pack(">H", 0x011E), 0, ks_enc, ks_mac, ssc)
+        resp_data, sw = send_apdu(connection, apdu, "SELECT_COM")
+        resp_data, sw = parse_sm_response(resp_data, ks_enc, ks_mac, ssc)
+        if sw != 0x9000:
+            raise RuntimeError(f"SELECT_FILE COM failed: SW={hex(sw)}")
+        
+        # WRITE COM
+        written = write_with_defect_handling(connection, 0x011E, com_path, "COM", ks_enc, ks_mac, ssc, written_total)
+        written_total += written
+        
+        print("\n>> Writing DG14 with BAC keys...")
+        print(f"[DEBUG] SSC before DG14 write: {ssc.hex()}")
+        
+        # SELECT DG14
+        apdu = build_sm_apdu(0x0C, 0xA4, 0x00, 0x00, struct.pack(">H", 0x010E), 0, ks_enc, ks_mac, ssc)
+        resp_data, sw = send_apdu(connection, apdu, "SELECT_DG14")
+        resp_data, sw = parse_sm_response(resp_data, ks_enc, ks_mac, ssc)
+        if sw != 0x9000:
+            raise RuntimeError(f"SELECT_FILE DG14 failed: SW={hex(sw)}")
+        
+        # WRITE DG14
+        written = write_with_defect_handling(connection, 0x010E, dg14_path, "DG14", ks_enc, ks_mac, ssc, written_total)
+        written_total += written
+        
+        # 第二阶段：执行CA并切换安全通道
+        print("\n" + "="*60)
+        print(">> PHASE 2: Chip Authentication Protocol Upgrade")
+        print("="*60)
+        
+        # Pre-CA硬件稳定延迟
+        print(f"[STABILIZE] Pre-CA hardware stabilization delay ({HARDWARE_RECOVERY_DELAY}s)...")
+        time.sleep(HARDWARE_RECOVERY_DELAY)
+        
+        try:
+            # 执行CA - 这是关键切换点！
+            print(f"[DEBUG] Before CA - Using BAC keys")
+            print(f"[DEBUG] SSC before CA: {ssc.hex()}")
+            
+            ks_enc_ca, ks_mac_ca, ssc_ca = perform_chip_authentication(
+                connection, ks_enc, ks_mac, ssc
+            )
+            
+            # Post-CA切换延迟
+            print(f"[STABILIZE] Post-CA key switching delay ({WRITE_DELAY}s)...")
+            time.sleep(WRITE_DELAY)
+            
+            # 切换到CA密钥
+            print("\n>> Switching to CA security context...")
+            ks_enc = ks_enc_ca
+            ks_mac = ks_mac_ca
+            ssc = ssc_ca  # 全零的新SSC！
+            
+            print(f"[DEBUG] After CA - Switched to CA keys")
+            print(f"[DEBUG] SSC after CA (reset): {ssc.hex()}")
+            print("[OK] Successfully switched to CA security channel")
+            
+        except Exception as e:
+            print(f"\n[ERROR] CA failed: {e}")
+            print("[FATAL] Cannot continue without CA - SSC continuity broken")
+            print("[FATAL] Remove card immediately!")
+            raise
+        
+        # 第三阶段：使用CA密钥写入剩余数据
+        print("\n" + "="*60)
+        print(">> PHASE 3: Writing remaining data with CA keys")
+        print("="*60)
+        
+        # 剩余文件列表
+        remaining_files = [
+            (0x0101, dg1_path, "DG1"),
+            (0x0102, dg2_path, "DG2"),
+            (0x010B, dg11_path, "DG11"),
+            (0x010C, dg12_path, "DG12"),
+            (0x010F, dg15_path, "DG15"),
+            (0x011D, sod_path, "SOD")  # SOD最后写入
+        ]
+        
+        for fid, file_path, name in remaining_files:
+            print(f"\n>> Writing {name} with CA keys...")
+            print(f"[DEBUG] Current SSC: {ssc.hex()}")
+            
+            # SELECT
             apdu = build_sm_apdu(0x0C, 0xA4, 0x00, 0x00, struct.pack(">H", fid), 0, ks_enc, ks_mac, ssc)
             resp_data, sw = send_apdu(connection, apdu, f"SELECT_{name}")
             resp_data, sw = parse_sm_response(resp_data, ks_enc, ks_mac, ssc)
             if sw != 0x9000:
                 raise RuntimeError(f"SELECT_FILE {name} ({hex(fid)}) failed: SW={hex(sw)}")
             
-            # 🚨 使用新的写入函数处理物理缺陷
+            # WRITE
             try:
                 written = write_with_defect_handling(connection, fid, file_path, name, ks_enc, ks_mac, ssc, written_total)
                 written_total += written
@@ -2230,11 +2477,12 @@ def personalize_passport(doc_nr: str, dob: str, doe: str, com_path: str, dg1_pat
         avg_speed = (total_bytes / 1024) / elapsed_time if elapsed_time > 0 else 0
         
         print("\n" + "="*60)
-        print(">> PASSPORT PERSONALIZATION COMPLETED SUCCESSFULLY!")
+        print(">> PASSPORT PERSONALIZATION WITH CA COMPLETED SUCCESSFULLY!")
         print("="*60)
         print(f">> Total time: {elapsed_time:.2f} seconds")
         print(f">> Average speed: {avg_speed:.2f} KB/s")
         print(f">> Data written: {total_bytes} bytes")
+        print(f">> CA security channel was successfully established and used")
         print("="*60)
         
         # 🚨 关键：个人化完成后立即断卡！避免诅咒！
@@ -2270,6 +2518,19 @@ def personalize_passport(doc_nr: str, dob: str, doe: str, com_path: str, dg1_pat
         if DEBUG_MODE:
             traceback.print_exc()
         return False
+
+
+def personalize_passport(doc_nr: str, dob: str, doe: str, com_path: str, dg1_path: str, dg2_path: str, 
+                        dg11_path: str, dg12_path: str, dg14_path: str, dg15_path: str, sod_path: str = None, 
+                        aid: str = "A0 00 00 02 47 10 01", connection=None):
+    """
+    包装函数 - 调用带CA的个人化流程
+    保持向后兼容性
+    """
+    return personalize_passport_with_ca(doc_nr, dob, doe, com_path, dg1_path, dg2_path, 
+                                       dg11_path, dg12_path, dg14_path, dg15_path, sod_path, 
+                                       aid, connection)
+
 
 if __name__ == "__main__":
     try:
