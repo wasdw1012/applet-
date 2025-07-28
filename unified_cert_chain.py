@@ -1076,85 +1076,6 @@ class UnifiedCertChainGenerator:
         
         print(f"    ✓ DG14生成完成: {filename} ({len(dg14)} 字节)")
     
-    def generate_documentation(self):
-
-        country_full_name = COUNTRY_DATA[self.country_2]['full_name']
-        # 自定义时间戳
-        timestamp_note = ""
-        if self.custom_timestamp:
-            timestamp_note = f"""
-## 自定义时间戳
-- DSC时间戳：{self.custom_timestamp}
-- 此时间戳应与MRZ中的护照签发日期相匹配
-"""
-        
-        # 机构代码
-        org_code_note = ""
-        if self.org_code:
-            org_code_note = f"""
-## 机构代码
-- 机构代码：{self.org_code}
-- DSC CN格式：CDS {self.org_code}-{self.custom_timestamp if self.custom_timestamp else 'timestamp'}
-"""
-        
-        readme_content = f"""# {self.country_2} 证书链
-
-## 文件清单
-- {self.country_2}_CSCA_*.der : CSCA根证书 (15年有效期) DER格式
-- {self.country_2}_DSC_*.der : DSC文档签名证书 (10年有效期) DER格式 
-- {self.country_2}_AA_RSA_1024_private.der : AA主动认证私钥 
-- DG15.bin : DG15数据文件 APPLICATION 15格式 
-- {self.country_2}_DSC_Chain.pfx : DSC完整证书链 
-
-## 证书Subject结构层次
-### CSCA (根证书):
-```
-C={self.country_2}
-O={country_full_name} Government
-OU=Ministry of Foreign Affairs
-OU={country_full_name} Passport CA
-CN={country_full_name} Passport Country Signing Certificate
-```
-
-### DSC (文档签名证书):
-```
-C={self.country_2}
-O={country_full_name} Government
-OU=National Immigration Administration of PRC
-OU={self.specific_issuing_authority or '<<具体签发机构OU（输入）>>'}
-OU=Passport
-CN=CDS 机构代码-时间戳
-```
-{timestamp_note}{org_code_note}
-
-### 自定义时间戳（匹配MRZ签发日期）
-```
-# YYYYMMDD格式
-python unified_cert_chain.py 20230704
-
-# 完整的YYYYMMDDHHMMSS格式
-python unified_cert_chain.py 20230704063932
-```
-# 指定时间戳和机构代码
-python unified_cert_chain.py --timestamp 20230704063932 --org-code DZHZB1210080-14
-```
-"""
-        
-        # EAC部分文档
-        if self.enable_eac:
-            eac_section = f"""
-
-
-
-# CA密钥 (Chip Authentication)
-- `{self.country_2}_CA_P224_private.der` - EC P-224私钥
-- `DG14.bin` - SecurityInfos和CA公钥
-
-"""
-            readme_content += eac_section
-        
-        with open(os.path.join(self.output_dir, "README.md"), 'w') as f:
-            f.write(readme_content)
     
     def collect_all_parameters(self):
         """收集所有生成参数"""
@@ -1277,8 +1198,6 @@ python unified_cert_chain.py --timestamp 20230704063932 --org-code DZHZB1210080-
         self.generate_dg15_files()
         
         self.generate_eac_components()  # 直接调用，不判断
-        
-        self.generate_documentation()
         
         print(f"\n {self.country_2} 证书链生成完成: {self.output_dir}")
         
