@@ -479,8 +479,44 @@ def generate_dg2_compact(image_path, output_path, format_preference, min_size, m
     feature_points = detect_facial_features(image_path)
     if feature_points:
         logging.info(f"成功检测到 {len(feature_points)} 个特征点")
+        
+        # --- 新增：瞳距验证 ---
+        try:
+            # 按类型查找左眼和右眼的特征点
+            left_eye = next(p for p in feature_points if p['type'] == 0x03)
+            right_eye = next(p for p in feature_points if p['type'] == 0x04)
+            
+            # 计算欧几里得距离（瞳距）
+            distance = ((left_eye['x'] - right_eye['x'])**2 + (left_eye['y'] - right_eye['y'])**2)**0.5
+            
+            logging.info(f"检测到瞳距为: {distance:.2f} 像素")
+            
+            # 根据ICAO 9303 Part 5要求验证瞳距
+            if distance < 120:
+                logging.error(f"合规性错误：瞳距 ({distance:.2f} px) 小于ICAO要求的最低120像素。")
+                logging.error("图像分辨率或人脸大小不符合护照照片标准。")
+                
+                # 计算建议的最小图像尺寸
+                current_face_ratio = distance / width  # 瞳距占图像宽度的比例
+                min_width_needed = int(120 / current_face_ratio)
+                logging.error(f"建议：基于当前人脸比例，图像宽度至少需要 {min_width_needed} 像素")
+                
+                return False  # 中断处理
+            elif distance < 140:
+                logging.warning(f"合规性警告：瞳距 ({distance:.2f} px) 低于推荐的140像素，可能影响识别率。")
+                logging.warning("建议使用更高分辨率的图像或确保人脸在照片中占据更大比例。")
+            else:
+                logging.info(f"瞳距验证通过：{distance:.2f} 像素符合ICAO标准。")
+                
+        except StopIteration:
+            logging.error("无法在特征点列表中找到双眼坐标，无法验证瞳距。")
+            logging.error("这可能表示面部检测失败或图像质量问题。")
+            return False
+        # --- 瞳距验证结束 ---
+        
     else:
         logging.info("未检测到特征点或检测失败，将不包含特征点数据")
+        logging.warning("虽然可以继续生成DG2，但缺少特征点可能导致严格验证失败。")
     
     # 深入A1内部
     logging.info("  [套嵌] -> 构建 [A1] CBEFF Header...")
