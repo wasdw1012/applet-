@@ -360,7 +360,22 @@ def create_facial_information(image_type: int, width: int, height: int, feature_
     image_info += struct.pack('>H', width)
     image_info += struct.pack('>H', height)
     logging.info("        [5F2E内部]     - 颜色空间")
-    image_info += struct.pack('>B', 0)  # 改为0
+    # 根据ISO/IEC 19794-5 Table 11设置正确的颜色空间
+    # 0x01: 8-bit Grayscale
+    # 0x03: 24-bit sRGB Color
+    # 0x00: 未指定 (不推荐用于标准护照照片)
+    if image_type == IMAGE_TYPE_JPEG:
+        # JPEG通常是彩色的
+        color_space = 0x03  # 24-bit sRGB Color
+    elif image_type == IMAGE_TYPE_JPEG2000:
+        # JPEG2000可能是彩色或灰度，这里假设是彩色
+        color_space = 0x03  # 24-bit sRGB Color
+    else:
+        # 其他情况使用未指定
+        color_space = 0x00
+    image_info += struct.pack('>B', color_space)
+    logging.info(f"        [5F2E内部]       - 值: 0x{color_space:02X}")
+    
     logging.info("        [5F2E内部]     - 来源类型")
     image_info += struct.pack('>B', 0)  # 改为0
     logging.info("        [5F2E内部]     - 设备类型")
@@ -651,28 +666,104 @@ def validate_and_extract_dg2_strict(dg2_data: bytes, output_prefix="extracted"):
         offset += 2
         if num_images != 1: raise ValueError(f"图像数量不为1，而是{num_images}")
 
-        # 7.4 读取并跳过面部信息块和图像信息块
-        # (面部信息+特征点+图像信息)
+        # 7.4 逐字段解析面部信息块
+        print("解析面部信息块...")
+        
+        # 先读取特征点数量
         num_feature_points = struct.unpack('>H', val_5F2E[offset:offset+2])[0]
         offset += 2
+        print(f"     特征点数量: {num_feature_points}")
         
-        facial_info_block_size = 17 # 性别(1)+眼色(1)+发色(1)+特征掩码(3)+表情(2)+姿态(3)+不确定性(3)
-        feature_points_block_size = 5 * num_feature_points # 每个特征点5字节：类型(1)+X(2)+Y(2)
-        image_info_block_size = 12
+        # 读取性别字段
+        gender = struct.unpack('>B', val_5F2E[offset:offset+1])[0]
+        offset += 1
+        print(f"     性别: 0x{gender:02X}")
         
-        # 修正：计算正确的偏移量
-        # 头部已经占用了14字节（FAC\0 + 010\0 + 长度 + 图像数）
-        # 然后是特征点数量(2字节) + 面部信息(17字节) + 特征点数据 + 图像信息(12字节)
-        offset += facial_info_block_size + feature_points_block_size + image_info_block_size
+        # 读取眼色字段
+        eye_color = struct.unpack('>B', val_5F2E[offset:offset+1])[0]
+        offset += 1
+        print(f"     眼色: 0x{eye_color:02X}")
         
+        # 读取发色字段
+        hair_color = struct.unpack('>B', val_5F2E[offset:offset+1])[0]
+        offset += 1
+        print(f"     发色: 0x{hair_color:02X}")
+        
+        # 读取特征掩码 (3字节)
+        feature_mask = val_5F2E[offset:offset+3]
+        offset += 3
+        print(f"     特征掩码: {feature_mask.hex()}")
+        
+        # 读取表情 (2字节)
+        expression = struct.unpack('>H', val_5F2E[offset:offset+2])[0]
+        offset += 2
+        print(f"     表情: 0x{expression:04X}")
+        
+        # 读取姿态角度 (3字节)
+        pose_angle = val_5F2E[offset:offset+3]
+        offset += 3
+        print(f"     姿态角度: {pose_angle.hex()}")
+        
+        # 读取姿态角度不确定性 (3字节)
+        pose_angle_uncertainty = val_5F2E[offset:offset+3]
+        offset += 3
+        print(f"     姿态角度不确定性: {pose_angle_uncertainty.hex()}")
+        
+        # 7.5 解析特征点数据
+        if num_feature_points > 0:
+            print(f"解析{num_feature_points}个特征点...")
+            for i in range(num_feature_points):
+                fp_type = struct.unpack('>B', val_5F2E[offset:offset+1])[0]
+                offset += 1
+                fp_x = struct.unpack('>H', val_5F2E[offset:offset+2])[0]
+                offset += 2
+                fp_y = struct.unpack('>H', val_5F2E[offset:offset+2])[0]
+                offset += 2
+                print(f"     特征点{i+1}: 类型=0x{fp_type:02X}, 位置=({fp_x}, {fp_y})")
+        
+        # 7.6 解析图像信息块
+        print("解析图像信息块...")
+        
+        # 面部图像类型
+        face_image_type = struct.unpack('>B', val_5F2E[offset:offset+1])[0]
+        offset += 1
+        print(f"     面部图像类型: 0x{face_image_type:02X}")
+        
+        # 图像数据类型
+        image_data_type = struct.unpack('>B', val_5F2E[offset:offset+1])[0]
+        offset += 1
+        print(f"     图像数据类型: 0x{image_data_type:02X}")
+        
+        # 宽度和高度
+        width = struct.unpack('>H', val_5F2E[offset:offset+2])[0]
+        offset += 2
+        height = struct.unpack('>H', val_5F2E[offset:offset+2])[0]
+        offset += 2
+        print(f"     尺寸: {width}x{height}")
+        
+        # 颜色空间
+        color_space = struct.unpack('>B', val_5F2E[offset:offset+1])[0]
+        offset += 1
+        print(f"     颜色空间: 0x{color_space:02X}")
+        
+        # 来源类型
+        source_type = struct.unpack('>B', val_5F2E[offset:offset+1])[0]
+        offset += 1
+        print(f"     来源类型: 0x{source_type:02X}")
+        
+        # 设备类型
+        device_type = struct.unpack('>H', val_5F2E[offset:offset+2])[0]
+        offset += 2
+        print(f"     设备类型: 0x{device_type:04X}")
+        
+        # 质量
+        quality = struct.unpack('>H', val_5F2E[offset:offset+2])[0]
+        offset += 2
+        print(f"     质量: 0x{quality:04X}")
+        
+        # 7.7 提取图像数据
         image_data = val_5F2E[offset:]
         
-        # 7.5 验证图像数据长度
-        expected_image_len = len(val_5F2E) - offset
-        if len(image_data) != expected_image_len:
-             raise ValueError(f"图像数据长度不匹配：期望 {expected_image_len}, 实际 {len(image_data)}")
-        print("   Image Data Offset & Length ... OK")
-
         # 8. 判断图像类型并保存
         # JP2签名盒包含 "jP  " (0x6A502020) 后跟 CR/LF/0x87/LF
         jp2_signature = b'\x6A\x50\x20\x20\x0D\x0A\x87\x0A'
