@@ -187,29 +187,25 @@ def detect_facial_features(image_path):
             point = landmarks.part(i)
             points.append((point.x, point.y))
         
+        # 辅助函数：计算点集的中心
+        def calculate_center(point_list):
+            """计算一组点的中心坐标"""
+            x_center = int(sum(p[0] for p in point_list) / len(point_list))
+            y_center = int(sum(p[1] for p in point_list) / len(point_list))
+            return (x_center, y_center)
+        
         # 计算ICAO需要的特征点
         # 左眼中心 (点36-41的中心)
-        left_eye_points = points[36:42]
-        left_eye_center = (
-            int(sum(p[0] for p in left_eye_points) / len(left_eye_points)),
-            int(sum(p[1] for p in left_eye_points) / len(left_eye_points))
-        )
+        left_eye_center = calculate_center(points[36:42])
         
         # 右眼中心 (点42-47的中心)
-        right_eye_points = points[42:48]
-        right_eye_center = (
-            int(sum(p[0] for p in right_eye_points) / len(right_eye_points)),
-            int(sum(p[1] for p in right_eye_points) / len(right_eye_points))
-        )
+        right_eye_center = calculate_center(points[42:48])
         
         # 鼻尖 (点30)
         nose_tip = points[30]
         
         # 嘴巴中心 (点51和57的中点)
-        mouth_center = (
-            int((points[51][0] + points[57][0]) / 2),
-            int((points[51][1] + points[57][1]) / 2)
-        )
+        mouth_center = calculate_center([points[51], points[57]])
         
         # 返回ICAO特征点
         feature_points = [
@@ -661,7 +657,7 @@ def validate_and_extract_dg2_strict(dg2_data: bytes, output_prefix="extracted"):
         offset += 2
         
         facial_info_block_size = 17 # 性别(1)+眼色(1)+发色(1)+特征掩码(3)+表情(2)+姿态(3)+不确定性(3)
-        feature_points_block_size = 6 * num_feature_points # 每个特征点6字节
+        feature_points_block_size = 5 * num_feature_points # 每个特征点5字节：类型(1)+X(2)+Y(2)
         image_info_block_size = 12
         
         # 修正：计算正确的偏移量
