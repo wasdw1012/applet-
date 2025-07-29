@@ -18,6 +18,15 @@ except ImportError:
     HAS_JP2_SUPPORT = False
     print("警告: 未安装glymur库，JPEG2000支持不可用")
 
+# 检查面部特征点检测支持
+try:
+    import dlib
+    import cv2
+    HAS_FACE_DETECTION = True
+except ImportError:
+    HAS_FACE_DETECTION = False
+    print("警告: 未安装dlib或cv2，面部特征点检测不可用")
+
 #模板块标签参数
 DG2_TAG = 0x75  
 BIOMETRIC_INFO_GROUP_TEMPLATE_TAG = 0x7F61  
@@ -140,6 +149,83 @@ def apply_preprocessing(img):
     
     return img
 
+# 面部特征点检测函数
+def detect_facial_features(image_path):
+    """检测面部特征点并返回ICAO所需的关键点"""
+    if not HAS_FACE_DETECTION:
+        logging.warning("面部特征点检测不可用，返回默认值")
+        return None
+    
+    try:
+        # 读取图像
+        img = cv2.imread(image_path)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        
+        # 初始化人脸检测器和特征点预测器
+        detector = dlib.get_frontal_face_detector()
+        # 需要下载 shape_predictor_68_face_landmarks.dat 模型文件
+        predictor_path = "shape_predictor_68_face_landmarks.dat"
+        if not os.path.exists(predictor_path):
+            logging.error(f"未找到dlib模型文件: {predictor_path}")
+            return None
+            
+        predictor = dlib.shape_predictor(predictor_path)
+        
+        # 检测人脸
+        faces = detector(gray)
+        if len(faces) == 0:
+            logging.warning("未检测到人脸")
+            return None
+        
+        # 使用第一个检测到的人脸
+        face = faces[0]
+        landmarks = predictor(gray, face)
+        
+        # 提取68个特征点
+        points = []
+        for i in range(68):
+            point = landmarks.part(i)
+            points.append((point.x, point.y))
+        
+        # 计算ICAO需要的特征点
+        # 左眼中心 (点36-41的中心)
+        left_eye_points = points[36:42]
+        left_eye_center = (
+            int(sum(p[0] for p in left_eye_points) / len(left_eye_points)),
+            int(sum(p[1] for p in left_eye_points) / len(left_eye_points))
+        )
+        
+        # 右眼中心 (点42-47的中心)
+        right_eye_points = points[42:48]
+        right_eye_center = (
+            int(sum(p[0] for p in right_eye_points) / len(right_eye_points)),
+            int(sum(p[1] for p in right_eye_points) / len(right_eye_points))
+        )
+        
+        # 鼻尖 (点30)
+        nose_tip = points[30]
+        
+        # 嘴巴中心 (点51和57的中点)
+        mouth_center = (
+            int((points[51][0] + points[57][0]) / 2),
+            int((points[51][1] + points[57][1]) / 2)
+        )
+        
+        # 返回ICAO特征点
+        feature_points = [
+            {'type': 0x0C, 'x': left_eye_center[0], 'y': left_eye_center[1]},  # 左眼中心
+            {'type': 0x0D, 'x': right_eye_center[0], 'y': right_eye_center[1]}, # 右眼中心
+            {'type': 0x0E, 'x': nose_tip[0], 'y': nose_tip[1]},                # 鼻尖
+            {'type': 0x0F, 'x': mouth_center[0], 'y': mouth_center[1]}         # 嘴巴中心
+        ]
+        
+        logging.info(f"成功检测到{len(feature_points)}个特征点")
+        return feature_points
+        
+    except Exception as e:
+        logging.error(f"特征点检测失败: {e}")
+        return None
+
 #转换紧凑JPEG2000格式
 def convert_image_to_jpeg2000_compact(input_path, target_size, min_size, max_size):
     if not HAS_JP2_SUPPORT:
@@ -231,75 +317,13 @@ def create_facial_record_header():
     return header
     
 #创建头信息和头信息数据块
-def create_facial_information(image_type: int, width: int, height: int) -> bytes:
+def create_facial_information(image_type: int, width: int, height: int, feature_points: list = None) -> bytes:
     
     logging.info("        [5F2E内部] --- 构建大头信息块 (Facial Info) ---")
     
-    # 添加面部特征点
-    # 根据ICAO 9303标准，定义关键面部特征点
-    feature_points = []
-    
-    # 特征点类型代码（根据ISO/IEC 19794-5）
-    FEATURE_TYPE_LEFT_EYE_CENTER = 0x0C  # 左眼中心
-    FEATURE_TYPE_RIGHT_EYE_CENTER = 0x0D  # 右眼中心
-    FEATURE_TYPE_NOSE_TIP = 0x0E  # 鼻尖
-    FEATURE_TYPE_MOUTH_CENTER = 0x0F  # 嘴巴中心
-    FEATURE_TYPE_LEFT_EYE_OUTER = 0x10  # 左眼外角
-    FEATURE_TYPE_RIGHT_EYE_OUTER = 0x11  # 右眼外角
-    
-    # 基于图像尺寸计算特征点位置（这里使用标准护照照片的比例）
-    # 标准护照照片中，眼睛通常在图像高度的40-45%位置
-    eye_level = int(height * 0.42)
-    
-    # 眼距通常是头宽的1/3
-    eye_distance = int(width * 0.33)
-    center_x = width // 2
-    
-    # 添加左眼中心
-    left_eye_x = center_x - eye_distance // 2
-    feature_points.append({
-        'type': FEATURE_TYPE_LEFT_EYE_CENTER,
-        'x': left_eye_x,
-        'y': eye_level
-    })
-    
-    # 添加右眼中心
-    right_eye_x = center_x + eye_distance // 2
-    feature_points.append({
-        'type': FEATURE_TYPE_RIGHT_EYE_CENTER,
-        'x': right_eye_x,
-        'y': eye_level
-    })
-    
-    # 添加鼻尖（通常在眼睛下方，图像高度的55-60%位置）
-    nose_y = int(height * 0.57)
-    feature_points.append({
-        'type': FEATURE_TYPE_NOSE_TIP,
-        'x': center_x,
-        'y': nose_y
-    })
-    
-    # 添加嘴巴中心（通常在图像高度的70%位置）
-    mouth_y = int(height * 0.70)
-    feature_points.append({
-        'type': FEATURE_TYPE_MOUTH_CENTER,
-        'x': center_x,
-        'y': mouth_y
-    })
-    
-    # 添加左眼外角
-    feature_points.append({
-        'type': FEATURE_TYPE_LEFT_EYE_OUTER,
-        'x': left_eye_x - int(width * 0.05),
-        'y': eye_level
-    })
-    
-    # 添加右眼外角
-    feature_points.append({
-        'type': FEATURE_TYPE_RIGHT_EYE_OUTER,
-        'x': right_eye_x + int(width * 0.05),
-        'y': eye_level
-    })
+    # 如果没有提供特征点，使用默认值或空列表
+    if feature_points is None:
+        feature_points = []
     
     feature_points_size = len(feature_points)
     facial_info = b''
@@ -321,14 +345,14 @@ def create_facial_information(image_type: int, width: int, height: int) -> bytes
     facial_info += struct.pack('>BBB', 0, 0, 0)
     
     # 添加特征点数据
-    logging.info(f"        [5F2E内部]     - 添加{feature_points_size}个特征点")
-    for point in feature_points:
-        # 每个特征点6字节：类型(1字节) + 主要码(1字节) + x坐标(2字节) + y坐标(2字节)
-        facial_info += struct.pack('>B', point['type'])  # 特征点类型
-        facial_info += struct.pack('>B', 0x00)  # 主要码（0表示2D坐标）
-        facial_info += struct.pack('>H', point['x'])  # X坐标
-        facial_info += struct.pack('>H', point['y'])  # Y坐标
-        logging.info(f"        [5F2E内部]       - 特征点 0x{point['type']:02X}: ({point['x']}, {point['y']})")
+    if feature_points_size > 0:
+        logging.info(f"        [5F2E内部]     - 添加{feature_points_size}个特征点")
+        for point in feature_points:
+            # 每个特征点：类型(1字节) + X坐标(2字节) + Y坐标(2字节)
+            facial_info += struct.pack('>B', point['type'])  # 特征点类型
+            facial_info += struct.pack('>H', point['x'])     # X坐标
+            facial_info += struct.pack('>H', point['y'])     # Y坐标
+            logging.info(f"        [5F2E内部]       - 特征点 0x{point['type']:02X}: ({point['x']}, {point['y']})")
 
     logging.info("        [5F2E内部] --- 创建大头信息块 (Image Info) ---")
     image_info = b''
@@ -388,12 +412,12 @@ def create_biometric_header_template() -> bytes:
     return encode_tlv(BIOMETRIC_HEADER_TEMPLATE_TAG, header_content)
 
 #创建数据封装5F2E TLV
-def create_biometric_data_block(image_data: bytes, image_type: int, width: int, height: int) -> bytes:
+def create_biometric_data_block(image_data: bytes, image_type: int, width: int, height: int, feature_points: list = None) -> bytes:
     logging.info("    [5F2E内部] -> 构建ISO19794-5记录")
     
     logging.info("      [5F2E内部] --- 开始构建通用头 (General Header)")
     logging.info("      [5F2E内部]   - 格式标识符FAC")
-    info_block = create_facial_information(image_type, width, height)
+    info_block = create_facial_information(image_type, width, height, feature_points)
     
     facial_header_prefix = b'FAC\x00' + b'010\x00'  # 修复
     logging.info("      [5F2E内部]   - 版本号 ('0100')")
@@ -439,6 +463,14 @@ def generate_dg2_compact(image_path, output_path, format_preference, min_size, m
     # DG2套嵌
     logging.info("[套嵌] 构建DG2 TLV")
     
+    # 检测面部特征点
+    logging.info("检测面部特征点...")
+    feature_points = detect_facial_features(image_path)
+    if feature_points:
+        logging.info(f"成功检测到 {len(feature_points)} 个特征点")
+    else:
+        logging.info("未检测到特征点或检测失败，将不包含特征点数据")
+    
     # 深入A1内部
     logging.info("  [套嵌] -> 构建 [A1] CBEFF Header...")
     biometric_header_template = create_biometric_header_template()
@@ -447,7 +479,7 @@ def generate_dg2_compact(image_path, output_path, format_preference, min_size, m
 
     # 深入5F2E内部
     logging.info("  [套嵌] -> 开始构建 [5F2E] Biometric Data Block...")
-    biometric_data_block = create_biometric_data_block(image_data, image_type, width, height)
+    biometric_data_block = create_biometric_data_block(image_data, image_type, width, height, feature_points)
     logging.info(f"  [套嵌]   - 内部包含ISO 19794-5记录 ")
     logging.info(f"  [套嵌] <- [5F2E] Biometric Data Block 完成了 ({len(biometric_data_block)} 字节)")
     
