@@ -209,10 +209,10 @@ def detect_facial_features(image_path):
         
         # 返回ICAO特征点
         feature_points = [
-            {'type': 0x0C, 'x': left_eye_center[0], 'y': left_eye_center[1]},  # 左眼中心
-            {'type': 0x0D, 'x': right_eye_center[0], 'y': right_eye_center[1]}, # 右眼中心
-            {'type': 0x0E, 'x': nose_tip[0], 'y': nose_tip[1]},                # 鼻尖
-            {'type': 0x0F, 'x': mouth_center[0], 'y': mouth_center[1]}         # 嘴巴中心
+            {'type': 0x03, 'x': left_eye_center[0], 'y': left_eye_center[1]},   # 左眼中心
+            {'type': 0x04, 'x': right_eye_center[0], 'y': right_eye_center[1]}, # 右眼中心
+            {'type': 0x08, 'x': nose_tip[0], 'y': nose_tip[1]},                # 鼻尖
+            {'type': 0x0B, 'x': mouth_center[0], 'y': mouth_center[1]}         # 嘴巴中心
         ]
         
         logging.info(f"成功检测到{len(feature_points)}个特征点")
