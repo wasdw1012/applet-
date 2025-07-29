@@ -256,8 +256,8 @@ def convert_image_to_jpeg2000_compact(input_path, target_size, min_size, max_siz
             compression_ratio = base_compression_ratio * ratio_adjust
             
             # 限制压缩率范围
-            if compression_ratio > 50:
-                compression_ratio = 50
+            if compression_ratio > 20: # ICAO 推荐上限为 20:1
+                compression_ratio = 20
             elif compression_ratio < 10:
                 compression_ratio = 10
             
