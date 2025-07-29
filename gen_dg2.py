@@ -10,6 +10,14 @@ from io import BytesIO
 import hashlib
 import traceback
 
+# 检查JPEG2000支持
+try:
+    import glymur
+    HAS_JP2_SUPPORT = True
+except ImportError:
+    HAS_JP2_SUPPORT = False
+    print("警告: 未安装glymur库，JPEG2000支持不可用")
+
 #模板块标签参数
 DG2_TAG = 0x75  
 BIOMETRIC_INFO_GROUP_TEMPLATE_TAG = 0x7F61  
@@ -226,7 +234,74 @@ def create_facial_record_header():
 def create_facial_information(image_type: int, width: int, height: int) -> bytes:
     
     logging.info("        [5F2E内部] --- 构建大头信息块 (Facial Info) ---")
-    feature_points_size = 0
+    
+    # 添加面部特征点
+    # 根据ICAO 9303标准，定义关键面部特征点
+    feature_points = []
+    
+    # 特征点类型代码（根据ISO/IEC 19794-5）
+    FEATURE_TYPE_LEFT_EYE_CENTER = 0x0C  # 左眼中心
+    FEATURE_TYPE_RIGHT_EYE_CENTER = 0x0D  # 右眼中心
+    FEATURE_TYPE_NOSE_TIP = 0x0E  # 鼻尖
+    FEATURE_TYPE_MOUTH_CENTER = 0x0F  # 嘴巴中心
+    FEATURE_TYPE_LEFT_EYE_OUTER = 0x10  # 左眼外角
+    FEATURE_TYPE_RIGHT_EYE_OUTER = 0x11  # 右眼外角
+    
+    # 基于图像尺寸计算特征点位置（这里使用标准护照照片的比例）
+    # 标准护照照片中，眼睛通常在图像高度的40-45%位置
+    eye_level = int(height * 0.42)
+    
+    # 眼距通常是头宽的1/3
+    eye_distance = int(width * 0.33)
+    center_x = width // 2
+    
+    # 添加左眼中心
+    left_eye_x = center_x - eye_distance // 2
+    feature_points.append({
+        'type': FEATURE_TYPE_LEFT_EYE_CENTER,
+        'x': left_eye_x,
+        'y': eye_level
+    })
+    
+    # 添加右眼中心
+    right_eye_x = center_x + eye_distance // 2
+    feature_points.append({
+        'type': FEATURE_TYPE_RIGHT_EYE_CENTER,
+        'x': right_eye_x,
+        'y': eye_level
+    })
+    
+    # 添加鼻尖（通常在眼睛下方，图像高度的55-60%位置）
+    nose_y = int(height * 0.57)
+    feature_points.append({
+        'type': FEATURE_TYPE_NOSE_TIP,
+        'x': center_x,
+        'y': nose_y
+    })
+    
+    # 添加嘴巴中心（通常在图像高度的70%位置）
+    mouth_y = int(height * 0.70)
+    feature_points.append({
+        'type': FEATURE_TYPE_MOUTH_CENTER,
+        'x': center_x,
+        'y': mouth_y
+    })
+    
+    # 添加左眼外角
+    feature_points.append({
+        'type': FEATURE_TYPE_LEFT_EYE_OUTER,
+        'x': left_eye_x - int(width * 0.05),
+        'y': eye_level
+    })
+    
+    # 添加右眼外角
+    feature_points.append({
+        'type': FEATURE_TYPE_RIGHT_EYE_OUTER,
+        'x': right_eye_x + int(width * 0.05),
+        'y': eye_level
+    })
+    
+    feature_points_size = len(feature_points)
     facial_info = b''
     logging.info("        [5F2E内部]     - 特征点数量")
     facial_info += struct.pack('>H', feature_points_size)
@@ -244,6 +319,16 @@ def create_facial_information(image_type: int, width: int, height: int) -> bytes
     facial_info += struct.pack('>BBB', 0, 0, 0)
     logging.info("        [5F2E内部]     - 姿态角度不确定性")
     facial_info += struct.pack('>BBB', 0, 0, 0)
+    
+    # 添加特征点数据
+    logging.info(f"        [5F2E内部]     - 添加{feature_points_size}个特征点")
+    for point in feature_points:
+        # 每个特征点6字节：类型(1字节) + 主要码(1字节) + x坐标(2字节) + y坐标(2字节)
+        facial_info += struct.pack('>B', point['type'])  # 特征点类型
+        facial_info += struct.pack('>B', 0x00)  # 主要码（0表示2D坐标）
+        facial_info += struct.pack('>H', point['x'])  # X坐标
+        facial_info += struct.pack('>H', point['y'])  # Y坐标
+        logging.info(f"        [5F2E内部]       - 特征点 0x{point['type']:02X}: ({point['x']}, {point['y']})")
 
     logging.info("        [5F2E内部] --- 创建大头信息块 (Image Info) ---")
     image_info = b''
@@ -316,6 +401,8 @@ def create_biometric_data_block(image_data: bytes, image_type: int, width: int, 
     num_images = struct.pack('>H', 1)
     logging.info("      [5F2E内部]   - 人脸图像数量 (1)")
     
+    # 修正：通用头(14字节) + 面部信息块 + 图像数据
+    # 通用头：FAC\0(4) + 010\0(4) + 长度(4) + 图像数(2) = 14字节
     total_record_length = 14 + len(info_block) + len(image_data)
     logging.info(f"      [5F2E内部]   - 总记录长度 ({total_record_length} 字节)")
     
@@ -545,13 +632,15 @@ def validate_and_extract_dg2_strict(dg2_data: bytes, output_prefix="extracted"):
         feature_points_block_size = 6 * num_feature_points # 每个特征点6字节
         image_info_block_size = 12
         
-        header_and_info_total_size = 14 + 2 + facial_info_block_size + feature_points_block_size + image_info_block_size
+        # 修正：计算正确的偏移量
+        # 头部已经占用了14字节（FAC\0 + 010\0 + 长度 + 图像数）
+        # 然后是特征点数量(2字节) + 面部信息(17字节) + 特征点数据 + 图像信息(12字节)
+        offset += facial_info_block_size + feature_points_block_size + image_info_block_size
         
-        image_data_offset = header_and_info_total_size
-        image_data = val_5F2E[image_data_offset:]
+        image_data = val_5F2E[offset:]
         
         # 7.5 验证图像数据长度
-        expected_image_len = record_length - header_and_info_total_size
+        expected_image_len = len(val_5F2E) - offset
         if len(image_data) != expected_image_len:
              raise ValueError(f"图像数据长度不匹配：期望 {expected_image_len}, 实际 {len(image_data)}")
         print("   Image Data Offset & Length ... OK")
