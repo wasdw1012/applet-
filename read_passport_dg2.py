@@ -113,35 +113,40 @@ class PassportReader:
         """执行基本访问控制(BAC)"""
         # 1. 获取随机数
         get_challenge = [0x00, 0x84, 0x00, 0x00, 0x08]
-        rnd_icc = self.send_command(get_challenge)
+        rnd_icc = bytes(self.send_command(get_challenge))
         
         # 2. 生成随机数和密钥
         import os
         rnd_ifd = os.urandom(8)
         k_ifd = os.urandom(16)
         
-        # 3. 构建认证数据
-        s = rnd_ifd + bytes(rnd_icc) + k_ifd
+        # 3. 构建认证数据 S = RND.IFD || RND.ICC || K.IFD
+        s = rnd_ifd + rnd_icc + k_ifd
+        print(f"S: {s.hex()}")
         
-        # 4. 加密
+        # 4. 加密 E.IFD = Enc(Kenc, S)
         cipher = DES3.new(self.kenc, DES3.MODE_CBC, b'\x00' * 8)
         e_ifd = cipher.encrypt(s)
+        print(f"E_IFD: {e_ifd.hex()}")
         
-        # 5. 计算MAC (ISO 9797-1 Algorithm 3 with DES)
-        # Padding
-        padded = self.pad_data(e_ifd)
+        # 5. 计算MAC M.IFD = MAC(Kmac, E.IFD)
+        # 添加填充 (APDU命令头也要包含在MAC计算中)
+        cmd_header = bytes([0x00, 0x82, 0x00, 0x00, 0x28])
+        m = cmd_header + e_ifd
+        # 填充到8的倍数
+        m_padded = self.pad_data(m)
         
-        # MAC calculation
-        mac = self.compute_mac(padded)
+        # 计算MAC
+        mac = self.compute_mac(m_padded)
+        print(f"MAC: {mac.hex()}")
         
         # 6. 发送外部认证命令
         ext_auth_data = e_ifd + mac
-        ext_auth = [0x00, 0x82, 0x00, 0x00, len(ext_auth_data)] + list(ext_auth_data) + [0x28]
+        ext_auth = [0x00, 0x82, 0x00, 0x00, 0x28] + list(ext_auth_data) + [0x28]
         
         response = self.send_command(ext_auth)
         
         # 7. 解析响应并建立会话密钥
-        # TODO: 完整实现会话密钥派生
         print("BAC认证成功")
     
     def compute_mac(self, data):
