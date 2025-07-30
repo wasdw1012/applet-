@@ -99,13 +99,14 @@ class PassportReader:
         """调整DES密钥奇偶校验位"""
         adjusted = bytearray()
         for byte in key_bytes:
-            # 计算前7位的奇偶性
-            parity = 0
-            for i in range(7):
-                parity ^= (byte >> i) & 1
-            # 设置最低位为奇校验
-            adjusted_byte = (byte & 0xFE) | (parity ^ 1)
-            adjusted.append(adjusted_byte)
+            # 清除最低位
+            byte = byte & 0xFE
+            # 计算前7位中1的个数
+            parity = bin(byte >> 1).count('1')
+            # 如果是偶数个1，则最低位设为1（奇校验）
+            if parity % 2 == 0:
+                byte |= 1
+            adjusted.append(byte)
         return bytes(adjusted)
     
     def perform_bac(self):
@@ -145,23 +146,21 @@ class PassportReader:
     
     def compute_mac(self, data):
         """计算ISO 9797-1 MAC Algorithm 3"""
-        # Split Kmac into Ka and Kb
-        ka = self.kmac[:8]
-        kb = self.kmac[8:16]
+        # Use full Kmac as DES3 key
+        # Initial vector
+        iv = b'\x00' * 8
         
-        # Encrypt with Ka
-        cipher1 = DES3.new(ka, DES3.MODE_CBC, b'\x00' * 8)
-        intermediate = cipher1.encrypt(data)[-8:]
+        # CBC mode for all blocks except last
+        cipher = DES3.new(self.kmac, DES3.MODE_CBC, iv)
         
-        # Decrypt with Kb
-        cipher2 = DES3.new(kb, DES3.MODE_ECB)
-        decrypted = cipher2.decrypt(intermediate)
+        # Process all blocks
+        blocks = [data[i:i+8] for i in range(0, len(data), 8)]
         
-        # Encrypt with Ka again
-        cipher3 = DES3.new(ka, DES3.MODE_ECB)
-        mac = cipher3.encrypt(decrypted)
+        # Encrypt all blocks
+        result = cipher.encrypt(data)
         
-        return mac
+        # Return last 8 bytes as MAC
+        return result[-8:]
         
     def pad_data(self, data):
         """ISO 9797-1填充"""
