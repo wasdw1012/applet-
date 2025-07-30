@@ -147,16 +147,15 @@ def convert_image_to_jpeg2000_compact(input_path, min_size, max_size):
             try:
                 encoded = imagecodecs.jpeg2k_encode(
                     numpy_img,
-                    rate=ratio,         # 压缩比 N:1，最大20:1
+                    compression_ratios=[ratio],  # 新版本使用compression_ratios参数
                     codecformat='jp2',    
                     reversible=False,     # 有损压缩（9/7小波）
                     numrlvls=5,          # 5级小波分解（ICAO推荐）
                     cblkw=64,            # 代码块宽度
-                    cblkh=64,            # 代码块高度
-                    qstep=0.0625         # 量化步长
+                    cblkh=64             # 代码块高度
                 )
                 size = len(encoded)
-                print(f"    [ICAO合规] 尺寸={photo_size}, rate={ratio}:1 -> {size} 字节")
+                print(f"    [ICAO合规] 尺寸={photo_size}, compression_ratio={ratio}:1 -> {size} 字节")
 
                 if min_size <= size <= max_size:
                     print(f"    ✓ 找到ICAO合规的匹配 (压缩比 {ratio}:1)")
@@ -175,7 +174,7 @@ def convert_image_to_jpeg2000_compact(input_path, min_size, max_size):
     if best_data:
         w, h, r, s = best_size_info
         if r <= 20:  # 确保压缩比合规
-            print(f"    * 返回ICAO合规结果 ({s} 字节, rate={r}:1)")
+            print(f"    * 返回ICAO合规结果 ({s} 字节, compression_ratio={r}:1)")
             return best_data, IMAGE_TYPE_JPEG2000, w, h
 
 
