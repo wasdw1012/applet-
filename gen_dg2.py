@@ -208,19 +208,20 @@ def convert_image_to_jpeg2000_compact(input_path, min_size, max_size):
                             data = f.read()
                         os.remove(temp_path)
                         return data, IMAGE_TYPE_JPEG2000, resized_img.width, resized_img.height
+                    
+                    # 保存最接近目标的结果
+                    with open(temp_path, 'rb') as f:
+                        temp_data = f.read()
+                    
+                    if best_data is None or abs(size - (min_size + max_size) // 2) < abs(len(best_data) - (min_size + max_size) // 2):
+                        best_data = temp_data
+                        best_size_info = (resized_img.width, resized_img.height, ratio, size)
 
-                    if size < max_size:
-                        with open(temp_path, 'rb') as f:
-                            temp_data = f.read()
-                        if best_data is None or size > len(best_data):
-                            best_data = temp_data
-                            best_size_info = (resized_img.width, resized_img.height, ratio, size)
-                
                 except Exception as e:
                     print(f"    [调试] glymur 压缩失败: {e}")
-                    continue
+                    import traceback
+                    traceback.print_exc()
                 finally:
-                    # 清理临时文件
                     if os.path.exists(temp_path):
                         os.remove(temp_path)
     
@@ -230,7 +231,16 @@ def convert_image_to_jpeg2000_compact(input_path, min_size, max_size):
         w, h, r, s = best_size_info
         if r <= 20:  # 确保压缩比合规
             print(f"    * 返回ICAO合规结果 ({s} 字节, 压缩比={r}:1)")
-            return best_data, IMAGE_TYPE_JPEG2000, w, h
+        else:
+            print(f"    ! 警告: 压缩比 {r}:1 超过ICAO建议的20:1，但仍返回结果 ({s} 字节)")
+        
+        # 添加大小警告
+        if s < min_size:
+            print(f"    ! 警告: 文件大小 {s/1000:.1f}KB 小于目标范围 {min_size/1000:.0f}-{max_size/1000:.0f}KB")
+        elif s > max_size:
+            print(f"    ! 警告: 文件大小 {s/1000:.1f}KB 大于目标范围 {min_size/1000:.0f}-{max_size/1000:.0f}KB")
+            
+        return best_data, IMAGE_TYPE_JPEG2000, w, h
     
     # 如果都不可用，提示错误
     if not HAS_IMAGECODECS and not HAS_JP2_SUPPORT:
