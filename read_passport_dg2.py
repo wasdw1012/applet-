@@ -148,6 +148,25 @@ class PassportReader:
         
         # 7. 解析响应并建立会话密钥
         print("BAC认证成功")
+        
+    def select_passport_application(self):
+        """选择护照应用 (AID: A0000002471001)"""
+        aid = [0xA0, 0x00, 0x00, 0x02, 0x47, 0x10, 0x01]
+        select_app = [0x00, 0xA4, 0x04, 0x00, len(aid)] + aid
+        self.send_command(select_app)
+        print("已选择护照应用")
+        
+    def read_ef_com(self):
+        """读取EF.COM文件"""
+        # 选择EF.COM (文件ID: 011E)
+        select_com = [0x00, 0xA4, 0x02, 0x0C, 0x02, 0x01, 0x1E]
+        self.send_command(select_com)
+        
+        # 读取EF.COM
+        read_com = [0x00, 0xB0, 0x00, 0x00, 0x00]
+        com_data = self.send_command(read_com)
+        print(f"EF.COM读取成功，长度: {len(com_data)} 字节")
+        return com_data
     
     def compute_mac(self, data):
         """计算ISO 9797-1 MAC Algorithm 3"""
@@ -252,6 +271,12 @@ def main():
         
         # 执行BAC认证
         reader.perform_bac()
+        
+        # 选择护照应用
+        reader.select_passport_application()
+        
+        # 读取EF.COM
+        reader.read_ef_com()
         
         # 选择并读取DG2
         reader.select_dg2()
