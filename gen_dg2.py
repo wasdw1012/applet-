@@ -145,26 +145,45 @@ def convert_image_to_jpeg2000_compact(input_path, min_size, max_size):
         
         for ratio in compression_ratios:
             try:
-                encoded = imagecodecs.jpeg2k_encode(
-                    numpy_img,
-                    compression_ratios=[ratio],  # 新版本使用compression_ratios参数
-                    codecformat='jp2',    
-                    reversible=False,     # 有损压缩（9/7小波）
-                    numrlvls=5,          # 5级小波分解（ICAO推荐）
-                    cblkw=64,            # 代码块宽度
-                    cblkh=64             # 代码块高度
-                )
+                # 尝试最简单的调用方式
+                encoded = imagecodecs.jpeg2k_encode(numpy_img)
                 size = len(encoded)
-                print(f"    [ICAO合规] 尺寸={photo_size}, compression_ratio={ratio}:1 -> {size} 字节")
+                print(f"    [ICAO合规] 尺寸={photo_size}, 默认压缩 -> {size} 字节")
 
                 if min_size <= size <= max_size:
-                    print(f"    ✓ 找到ICAO合规的匹配 (压缩比 {ratio}:1)")
+                    print(f"    ✓ 找到ICAO合规的匹配")
                     return encoded, IMAGE_TYPE_JPEG2000, resized_img.width, resized_img.height
 
                 if size < max_size and (best_data is None or size > len(best_data)):
                     best_data = encoded
-                    best_size_info = (resized_img.width, resized_img.height, ratio, size)
+                    best_size_info = (resized_img.width, resized_img.height, 0, size)
             
+            except TypeError as e:
+                # 如果简单调用失败，尝试使用字典参数
+                print(f"    [调试] 尝试字典参数方式...")
+                try:
+                    # 尝试使用字典参数
+                    params = {
+                        'codecformat': 'jp2',
+                        'reversible': False,
+                        'numrlvls': 5,
+                        'cblkw': 64,
+                        'cblkh': 64
+                    }
+                    encoded = imagecodecs.jpeg2k_encode(numpy_img, **params)
+                    size = len(encoded)
+                    print(f"    [ICAO合规] 尺寸={photo_size}, 字典参数 -> {size} 字节")
+                    
+                    if min_size <= size <= max_size:
+                        print(f"    ✓ 找到ICAO合规的匹配")
+                        return encoded, IMAGE_TYPE_JPEG2000, resized_img.width, resized_img.height
+                        
+                    if size < max_size and (best_data is None or size > len(best_data)):
+                        best_data = encoded
+                        best_size_info = (resized_img.width, resized_img.height, 0, size)
+                except Exception as e2:
+                    print(f"    [调试] 字典参数也失败: {e2}")
+                    continue
             except Exception as e:
                 print(f"    [调试] 压缩失败: {e}")
                 continue
@@ -173,11 +192,39 @@ def convert_image_to_jpeg2000_compact(input_path, min_size, max_size):
     
     if best_data:
         w, h, r, s = best_size_info
-        if r <= 20:  # 确保压缩比合规
-            print(f"    * 返回ICAO合规结果 ({s} 字节, compression_ratio={r}:1)")
-            return best_data, IMAGE_TYPE_JPEG2000, w, h
-
-
+        print(f"    * 返回最佳结果 ({s} 字节)")
+        return best_data, IMAGE_TYPE_JPEG2000, w, h
+    
+    # 如果imagecodecs失败，尝试使用Pillow作为后备方案
+    print("--- 尝试使用Pillow作为后备方案 ---")
+    for photo_size in reversed(PASSPORT_PHOTO_SIZES):
+        resized_img = optimize_image_size(img, photo_size)
+        
+        try:
+            # 使用BytesIO保存为JPEG2000
+            buffer = BytesIO()
+            resized_img.save(buffer, format='JPEG2000', quality_mode='rates', quality_layers=[20])
+            encoded = buffer.getvalue()
+            size = len(encoded)
+            print(f"    [Pillow] 尺寸={photo_size} -> {size} 字节")
+            
+            if min_size <= size <= max_size:
+                print(f"    ✓ 找到匹配 (通过Pillow)")
+                return encoded, IMAGE_TYPE_JPEG2000, resized_img.width, resized_img.height
+                
+            if size < max_size and (best_data is None or size > len(best_data)):
+                best_data = encoded
+                best_size_info = (resized_img.width, resized_img.height, 0, size)
+        except Exception as e:
+            print(f"    [调试] Pillow压缩失败: {e}")
+            continue
+    
+    if best_data:
+        w, h, r, s = best_size_info
+        print(f"    * 返回Pillow结果 ({s} 字节)")
+        return best_data, IMAGE_TYPE_JPEG2000, w, h
+    
+    raise Exception("无法完成JPEG2000压缩")
 
 def detect_facial_feature_points(image_np: np.ndarray) -> list:
     """
