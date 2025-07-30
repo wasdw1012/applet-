@@ -30,6 +30,7 @@ except ImportError:
 # 1. 主要结构与模板标签
 DG2_TAG = 0x75
 BIOMETRIC_INFO_GROUP_TEMPLATE_TAG = 0x7F61
+BIOMETRIC_INFO_TEMPLATE_TAG = 0x7F60  # 生物特征信息模板（PyMRTD 期望的层）
 BIOMETRIC_HEADER_TEMPLATE_TAG = 0xA1
 BIOMETRIC_DATA_BLOCK_TAG = 0x5F2E
 
@@ -364,7 +365,7 @@ def create_biometric_data_block(image_data: bytes) -> bytes:
 def validate_and_extract_dg2_strict(dg2_data: bytes, output_prefix="extracted") -> tuple[bool, str, int]:
     """
     [NEW] Validates the strict, compliant DG2 structure and extracts the image.
-    Structure: 75 -> 7F61 -> (02 + A1 + 5F2E)
+    Structure: 75 -> 7F61 -> (02 + 7F60 -> (A1 + 5F2E))
     """
     print("    验证: 正在使用严格模式验证DG2结构...")
     try:
@@ -402,10 +403,19 @@ def validate_and_extract_dg2_strict(dg2_data: bytes, output_prefix="extracted") 
         
         # 3. Parse content of 7F61
         parsed_group = parse_tlv(group_content)
-        if BIOMETRIC_DATA_BLOCK_TAG not in parsed_group:
-            raise ValueError("0x7F61 does not contain Biometric Data Block (0x5F2E)")
         
-        image_data = parsed_group[BIOMETRIC_DATA_BLOCK_TAG]
+        # Check for biometric info template (7F60)
+        if BIOMETRIC_INFO_TEMPLATE_TAG in parsed_group:
+            # New structure with 7F60 layer
+            biometric_info = parse_tlv(parsed_group[BIOMETRIC_INFO_TEMPLATE_TAG])
+            if BIOMETRIC_DATA_BLOCK_TAG not in biometric_info:
+                raise ValueError("0x7F60 does not contain Biometric Data Block (0x5F2E)")
+            image_data = biometric_info[BIOMETRIC_DATA_BLOCK_TAG]
+        elif BIOMETRIC_DATA_BLOCK_TAG in parsed_group:
+            # Old structure without 7F60 layer (for backward compatibility)
+            image_data = parsed_group[BIOMETRIC_DATA_BLOCK_TAG]
+        else:
+            raise ValueError("Cannot find Biometric Data Block (0x5F2E)")
         
         # 4. Save and verify extracted image
         image_ext = "jp2"
@@ -458,10 +468,19 @@ def generate_dg2_compact(image_path, output_path='DG2.bin', size_mode='compact')
     # 【修改调用】将 feature_points 传递给header创建函数
     biometric_header = create_biometric_header_template(width, height, image_type, feature_points)
     biometric_data = create_biometric_data_block(image_data)
+    
+    # 构建生物特征信息模板 (7F60) - PyMRTD 期望的结构
+    biometric_info_content = biometric_header + biometric_data
+    biometric_info_template = encode_tlv(BIOMETRIC_INFO_TEMPLATE_TAG, biometric_info_content)
+    
+    # 生物特征实例数量
     sample_number = encode_tlv(SAMPLE_NUMBER_TAG, b'\x01')
-
-    biometric_info_group_content = sample_number + biometric_header + biometric_data
+    
+    # 构建生物特征信息组模板 (7F61)
+    biometric_info_group_content = sample_number + biometric_info_template
     biometric_info_group = encode_tlv(BIOMETRIC_INFO_GROUP_TEMPLATE_TAG, biometric_info_group_content)
+    
+    # 最终的 DG2 结构
     dg2 = encode_tlv(DG2_TAG, biometric_info_group)
     print("    组装: ✓ DG2结构构建完成")
 
