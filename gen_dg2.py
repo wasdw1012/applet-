@@ -11,7 +11,21 @@ import hashlib
 import traceback
 import dlib 
 import cv2  
-import imagecodecs  
+
+# JPEG2000 支持检测
+try:
+    import glymur
+    HAS_JP2_SUPPORT = True
+except ImportError:
+    HAS_JP2_SUPPORT = False
+    print("警告: 未安装 glymur 库，JPEG2000 功能将受限")
+
+# 保留 imagecodecs 作为备选
+try:
+    import imagecodecs
+    HAS_IMAGECODECS = True
+except ImportError:
+    HAS_IMAGECODECS = False
 
 # 1. 主要结构与模板标签
 DG2_TAG = 0x75
@@ -125,6 +139,9 @@ def convert_image_to_jpeg2000_compact(input_path, min_size, max_size):
     符合ICAO 9303标准的JPEG2000压缩实现
     压缩比严格限制在20:1以内
     """
+    if not HAS_JP2_SUPPORT:
+        raise Exception("JPEG2000支持需要glymur库，请运行: pip install glymur")
+    
     img = Image.open(input_path)
     if img.mode != 'RGB':
         img = img.convert('RGB')
@@ -139,90 +156,50 @@ def convert_image_to_jpeg2000_compact(input_path, min_size, max_size):
     # 优先使用推荐范围 10:1 到 15:1
     compression_ratios = [10, 12, 15, 8, 18, 20]  # 最大不超过20:1
     
+    temp_path = 'temp_dg2.jp2'  # 临时文件路径
+    
     for photo_size in reversed(PASSPORT_PHOTO_SIZES):
         resized_img = optimize_image_size(img, photo_size)
         numpy_img = np.array(resized_img)
         
         for ratio in compression_ratios:
             try:
-                # 尝试最简单的调用方式
-                encoded = imagecodecs.jpeg2k_encode(numpy_img)
-                size = len(encoded)
-                print(f"    [ICAO合规] 尺寸={photo_size}, 默认压缩 -> {size} 字节")
+                # 使用glymur保存JPEG2000
+                glymur.Jp2k(temp_path, data=numpy_img, cratios=[ratio])
+                
+                # 读取文件大小
+                size = os.path.getsize(temp_path)
+                print(f"    [ICAO合规] 尺寸={photo_size}, cratios={ratio}:1 -> {size} 字节")
 
                 if min_size <= size <= max_size:
-                    print(f"    ✓ 找到ICAO合规的匹配")
-                    return encoded, IMAGE_TYPE_JPEG2000, resized_img.width, resized_img.height
+                    print(f"    ✓ 找到ICAO合规的匹配 (压缩比 {ratio}:1)")
+                    with open(temp_path, 'rb') as f:
+                        data = f.read()
+                    os.remove(temp_path)
+                    return data, IMAGE_TYPE_JPEG2000, resized_img.width, resized_img.height
 
-                if size < max_size and (best_data is None or size > len(best_data)):
-                    best_data = encoded
-                    best_size_info = (resized_img.width, resized_img.height, 0, size)
+                if size < max_size:
+                    with open(temp_path, 'rb') as f:
+                        temp_data = f.read()
+                    if best_data is None or size > len(best_data):
+                        best_data = temp_data
+                        best_size_info = (resized_img.width, resized_img.height, ratio, size)
             
-            except TypeError as e:
-                # 如果简单调用失败，尝试使用字典参数
-                print(f"    [调试] 尝试字典参数方式...")
-                try:
-                    # 尝试使用字典参数
-                    params = {
-                        'codecformat': 'jp2',
-                        'reversible': False,
-                        'numrlvls': 5,
-                        'cblkw': 64,
-                        'cblkh': 64
-                    }
-                    encoded = imagecodecs.jpeg2k_encode(numpy_img, **params)
-                    size = len(encoded)
-                    print(f"    [ICAO合规] 尺寸={photo_size}, 字典参数 -> {size} 字节")
-                    
-                    if min_size <= size <= max_size:
-                        print(f"    ✓ 找到ICAO合规的匹配")
-                        return encoded, IMAGE_TYPE_JPEG2000, resized_img.width, resized_img.height
-                        
-                    if size < max_size and (best_data is None or size > len(best_data)):
-                        best_data = encoded
-                        best_size_info = (resized_img.width, resized_img.height, 0, size)
-                except Exception as e2:
-                    print(f"    [调试] 字典参数也失败: {e2}")
-                    continue
             except Exception as e:
                 print(f"    [调试] 压缩失败: {e}")
                 continue
+            finally:
+                # 清理临时文件
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
     
     print("--- 压缩循环结束 ---")
     
     if best_data:
         w, h, r, s = best_size_info
-        print(f"    * 返回最佳结果 ({s} 字节)")
-        return best_data, IMAGE_TYPE_JPEG2000, w, h
-    
-    # 如果imagecodecs失败，尝试使用Pillow作为后备方案
-    print("--- 尝试使用Pillow作为后备方案 ---")
-    for photo_size in reversed(PASSPORT_PHOTO_SIZES):
-        resized_img = optimize_image_size(img, photo_size)
-        
-        try:
-            # 使用BytesIO保存为JPEG2000
-            buffer = BytesIO()
-            resized_img.save(buffer, format='JPEG2000', quality_mode='rates', quality_layers=[20])
-            encoded = buffer.getvalue()
-            size = len(encoded)
-            print(f"    [Pillow] 尺寸={photo_size} -> {size} 字节")
-            
-            if min_size <= size <= max_size:
-                print(f"    ✓ 找到匹配 (通过Pillow)")
-                return encoded, IMAGE_TYPE_JPEG2000, resized_img.width, resized_img.height
-                
-            if size < max_size and (best_data is None or size > len(best_data)):
-                best_data = encoded
-                best_size_info = (resized_img.width, resized_img.height, 0, size)
-        except Exception as e:
-            print(f"    [调试] Pillow压缩失败: {e}")
-            continue
-    
-    if best_data:
-        w, h, r, s = best_size_info
-        print(f"    * 返回Pillow结果 ({s} 字节)")
-        return best_data, IMAGE_TYPE_JPEG2000, w, h
+        if r <= 20:  # 确保压缩比合规
+            print(f"    * 返回ICAO合规结果 ({s} 字节, cratios={r}:1)")
+            return best_data, IMAGE_TYPE_JPEG2000, w, h
     
     raise Exception("无法完成JPEG2000压缩")
 
