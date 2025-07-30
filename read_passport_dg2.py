@@ -169,22 +169,34 @@ class PassportReader:
         return com_data
     
     def compute_mac(self, data):
-        """计算ISO 9797-1 MAC Algorithm 3"""
-        # Use full Kmac as DES3 key
-        # Initial vector
-        iv = b'\x00' * 8
+        """计算ISO 9797-1 MAC Algorithm 3 (Retail MAC)"""
+        # Split key
+        ka = self.kmac[:8]
+        kb = self.kmac[8:16]
         
-        # CBC mode for all blocks except last
-        cipher = DES3.new(self.kmac, DES3.MODE_CBC, iv)
-        
-        # Process all blocks
+        # Process all blocks except last with single DES using Ka
         blocks = [data[i:i+8] for i in range(0, len(data), 8)]
         
-        # Encrypt all blocks
-        result = cipher.encrypt(data)
+        # CBC with Ka for all blocks except last
+        iv = b'\x00' * 8
+        for i in range(len(blocks) - 1):
+            # XOR with previous result
+            block = bytes(a ^ b for a, b in zip(blocks[i], iv))
+            # Encrypt with Ka
+            cipher = DES3.new(ka + ka + ka, DES3.MODE_ECB)
+            iv = cipher.encrypt(block)
         
-        # Return last 8 bytes as MAC
-        return result[-8:]
+        # For the last block, use full 3DES
+        # XOR with previous result
+        last_block = bytes(a ^ b for a, b in zip(blocks[-1], iv))
+        # Decrypt with Kb
+        cipher2 = DES3.new(kb + kb + kb, DES3.MODE_ECB)
+        temp = cipher2.decrypt(last_block)
+        # Encrypt with Ka
+        cipher3 = DES3.new(ka + ka + ka, DES3.MODE_ECB)
+        mac = cipher3.encrypt(temp)
+        
+        return mac
         
     def pad_data(self, data):
         """ISO 9797-1填充"""
