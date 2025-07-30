@@ -139,9 +139,6 @@ def convert_image_to_jpeg2000_compact(input_path, min_size, max_size):
     符合ICAO 9303标准的JPEG2000压缩实现
     压缩比严格限制在20:1以内
     """
-    if not HAS_JP2_SUPPORT:
-        raise Exception("JPEG2000支持需要glymur库，请运行: pip install glymur")
-    
     img = Image.open(input_path)
     if img.mode != 'RGB':
         img = img.convert('RGB')
@@ -156,50 +153,88 @@ def convert_image_to_jpeg2000_compact(input_path, min_size, max_size):
     # 优先使用推荐范围 10:1 到 15:1
     compression_ratios = [10, 12, 15, 8, 18, 20]  # 最大不超过20:1
     
-    temp_path = 'temp_dg2.jp2'  # 临时文件路径
-    
-    for photo_size in reversed(PASSPORT_PHOTO_SIZES):
-        resized_img = optimize_image_size(img, photo_size)
-        numpy_img = np.array(resized_img)
-        
-        for ratio in compression_ratios:
-            try:
-                # 使用glymur保存JPEG2000
-                glymur.Jp2k(temp_path, data=numpy_img, cratios=[ratio])
-                
-                # 读取文件大小
-                size = os.path.getsize(temp_path)
-                print(f"    [ICAO合规] 尺寸={photo_size}, cratios={ratio}:1 -> {size} 字节")
-
-                if min_size <= size <= max_size:
-                    print(f"    ✓ 找到ICAO合规的匹配 (压缩比 {ratio}:1)")
-                    with open(temp_path, 'rb') as f:
-                        data = f.read()
-                    os.remove(temp_path)
-                    return data, IMAGE_TYPE_JPEG2000, resized_img.width, resized_img.height
-
-                if size < max_size:
-                    with open(temp_path, 'rb') as f:
-                        temp_data = f.read()
-                    if best_data is None or size > len(best_data):
-                        best_data = temp_data
-                        best_size_info = (resized_img.width, resized_img.height, ratio, size)
+    # 优先尝试 imagecodecs（如果可用）
+    if HAS_IMAGECODECS:
+        print("使用 imagecodecs 进行JPEG2000压缩...")
+        for photo_size in reversed(PASSPORT_PHOTO_SIZES):
+            resized_img = optimize_image_size(img, photo_size)
+            numpy_img = np.array(resized_img)
             
-            except Exception as e:
-                print(f"    [调试] 压缩失败: {e}")
-                continue
-            finally:
-                # 清理临时文件
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
+            for ratio in compression_ratios:
+                try:
+                    # 使用 imagecodecs 的正确参数
+                    encoded = imagecodecs.jpeg2k_encode(
+                        numpy_img,
+                        level=ratio,         # 使用 level 而不是 rate
+                        codecformat='jp2',   # JP2 格式
+                        reversible=False     # 有损压缩
+                    )
+                    size = len(encoded)
+                    print(f"    [ICAO合规] 尺寸={photo_size}, level={ratio} -> {size} 字节")
+
+                    if min_size <= size <= max_size:
+                        print(f"    ✓ 找到ICAO合规的匹配 (压缩比 {ratio}:1)")
+                        return encoded, IMAGE_TYPE_JPEG2000, resized_img.width, resized_img.height
+
+                    if size < max_size and (best_data is None or size > len(best_data)):
+                        best_data = encoded
+                        best_size_info = (resized_img.width, resized_img.height, ratio, size)
+                
+                except Exception as e:
+                    print(f"    [调试] imagecodecs 压缩失败: {e}")
+                    continue
+    
+    # 如果 imagecodecs 不可用或失败，使用 glymur 作为后备
+    if best_data is None and HAS_JP2_SUPPORT:
+        print("使用 glymur 作为后备方案...")
+        temp_path = 'temp_dg2.jp2'
+        
+        for photo_size in reversed(PASSPORT_PHOTO_SIZES):
+            resized_img = optimize_image_size(img, photo_size)
+            numpy_img = np.array(resized_img)
+            
+            for ratio in compression_ratios:
+                try:
+                    # 使用glymur保存JPEG2000
+                    glymur.Jp2k(temp_path, data=numpy_img, cratios=[ratio])
+                    
+                    # 读取文件大小
+                    size = os.path.getsize(temp_path)
+                    print(f"    [ICAO合规] 尺寸={photo_size}, cratios={ratio}:1 -> {size} 字节")
+
+                    if min_size <= size <= max_size:
+                        print(f"    ✓ 找到ICAO合规的匹配 (压缩比 {ratio}:1)")
+                        with open(temp_path, 'rb') as f:
+                            data = f.read()
+                        os.remove(temp_path)
+                        return data, IMAGE_TYPE_JPEG2000, resized_img.width, resized_img.height
+
+                    if size < max_size:
+                        with open(temp_path, 'rb') as f:
+                            temp_data = f.read()
+                        if best_data is None or size > len(best_data):
+                            best_data = temp_data
+                            best_size_info = (resized_img.width, resized_img.height, ratio, size)
+                
+                except Exception as e:
+                    print(f"    [调试] glymur 压缩失败: {e}")
+                    continue
+                finally:
+                    # 清理临时文件
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
     
     print("--- 压缩循环结束 ---")
     
     if best_data:
         w, h, r, s = best_size_info
         if r <= 20:  # 确保压缩比合规
-            print(f"    * 返回ICAO合规结果 ({s} 字节, cratios={r}:1)")
+            print(f"    * 返回ICAO合规结果 ({s} 字节, 压缩比={r}:1)")
             return best_data, IMAGE_TYPE_JPEG2000, w, h
+    
+    # 如果都不可用，提示错误
+    if not HAS_IMAGECODECS and not HAS_JP2_SUPPORT:
+        raise Exception("JPEG2000支持需要 imagecodecs 或 glymur 库，请运行: pip install imagecodecs 或 pip install glymur")
     
     raise Exception("无法完成JPEG2000压缩")
 
