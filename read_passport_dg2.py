@@ -120,28 +120,48 @@ class PassportReader:
         k_ifd = os.urandom(16)
         
         # 3. 构建认证数据
-        s = rnd_ifd + rnd_icc + k_ifd
+        s = rnd_ifd + bytes(rnd_icc) + k_ifd
         
         # 4. 加密
         cipher = DES3.new(self.kenc, DES3.MODE_CBC, b'\x00' * 8)
         e_ifd = cipher.encrypt(s)
         
-        # 5. 计算MAC
-        # 这里简化了MAC计算，实际需要ISO 9797-1 MAC算法
-        mac_input = self.pad_data(e_ifd)
-        cipher_mac = DES3.new(self.kmac, DES3.MODE_CBC, b'\x00' * 8)
-        mac_full = cipher_mac.encrypt(mac_input)
-        m_ifd = mac_full[-8:]
+        # 5. 计算MAC (ISO 9797-1 Algorithm 3 with DES)
+        # Padding
+        padded = self.pad_data(e_ifd)
+        
+        # MAC calculation
+        mac = self.compute_mac(padded)
         
         # 6. 发送外部认证命令
-        ext_auth_data = e_ifd + m_ifd
-        ext_auth = [0x00, 0x82, 0x00, 0x00, len(ext_auth_data)] + list(ext_auth_data)
+        ext_auth_data = e_ifd + mac
+        ext_auth = [0x00, 0x82, 0x00, 0x00, len(ext_auth_data)] + list(ext_auth_data) + [0x28]
         
         response = self.send_command(ext_auth)
         
         # 7. 解析响应并建立会话密钥
         # TODO: 完整实现会话密钥派生
         print("BAC认证成功")
+    
+    def compute_mac(self, data):
+        """计算ISO 9797-1 MAC Algorithm 3"""
+        # Split Kmac into Ka and Kb
+        ka = self.kmac[:8]
+        kb = self.kmac[8:16]
+        
+        # Encrypt with Ka
+        cipher1 = DES3.new(ka, DES3.MODE_CBC, b'\x00' * 8)
+        intermediate = cipher1.encrypt(data)[-8:]
+        
+        # Decrypt with Kb
+        cipher2 = DES3.new(kb, DES3.MODE_ECB)
+        decrypted = cipher2.decrypt(intermediate)
+        
+        # Encrypt with Ka again
+        cipher3 = DES3.new(ka, DES3.MODE_ECB)
+        mac = cipher3.encrypt(decrypted)
+        
+        return mac
         
     def pad_data(self, data):
         """ISO 9797-1填充"""
