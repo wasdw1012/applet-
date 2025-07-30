@@ -154,7 +154,7 @@ def convert_image_to_jpeg2000_compact(input_path, min_size, max_size):
     compression_ratios = [10, 12, 15, 8, 18, 20]  # 最大不超过20:1
     
     # 优先尝试 imagecodecs（如果可用）
-    if HAS_IMAGECODECS:
+    if HAS_IMAGECODECS and False:  # 暂时禁用 imagecodecs，因为 level 参数不是压缩比
         print("使用 imagecodecs 进行JPEG2000压缩...")
         for photo_size in reversed(PASSPORT_PHOTO_SIZES):
             resized_img = optimize_image_size(img, photo_size)
