@@ -142,7 +142,7 @@ class PassportReader:
         
         # 6. 发送外部认证命令
         ext_auth_data = e_ifd + mac
-        ext_auth = [0x00, 0x82, 0x00, 0x00, 0x28] + list(ext_auth_data) + [0x28]
+        ext_auth = [0x00, 0x82, 0x00, 0x00, 0x28] + list(ext_auth_data)
         
         response = self.send_command(ext_auth)
         
