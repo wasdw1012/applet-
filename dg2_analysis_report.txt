@@ -1,0 +1,44 @@
+DG2 数据分析报告
+=====================================
+生成时间: 2025-07-31 05:16:07
+
+文件信息
+--------
+路径: N/A
+大小: 5178 字节
+SHA256: 7b870c891dec109fd122e82b881e0da2e7782213faa99b58ee0181360e696966
+
+DG2 结构
+--------
+DG2 标签: 0x75
+DG2 长度: 5174 字节
+图像数据长度: 5045 字节
+
+元数据
+------
+header_version: 1.1
+biometric_type: 2
+biometric_type_name: Facial Features
+biometric_subtype: 0
+creation_datetime: 20250731051506Z
+validity_period: 20250731 - 20350729
+creator: SimpleDG2Gen
+format_owner: 257
+format_type: 7
+format_type_name: JPEG
+image_width: 300
+image_height: 400
+特征点数量: 4
+feature_points_count: 4
+
+统计信息
+--------
+数据开销: 133 字节
+压缩比率: 97.43%
+
+特征点详情
+----------
+  点 0: 类型=1, 位置=(105, 140)
+  点 1: 类型=1, 位置=(195, 140)
+  点 2: 类型=1, 位置=(150, 200)
+  点 3: 类型=1, 位置=(150, 260)

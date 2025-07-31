@@ -1,0 +1,12 @@
+DG2 Generation Report
+=================================
+Generation Time: 2025-07-31 05:15:06
+Source File:     sample_passport_photo.jpg
+Output File:     sample_dg2.bin
+Format:          JPEG
+Dimensions:      300x400
+DG2 Size:        5178 bytes
+Image Size:      5045 bytes
+Overhead:        133 bytes
+SHA256:          7b870c891dec109fd122e82b881e0da2e7782213faa99b58ee0181360e696966
+Feature Points:  4 (approximate positions)
