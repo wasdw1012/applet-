@@ -1,16 +1,9 @@
-#!/usr/bin/env python3
-"""
-DG2生成器 - 基于ICAO 9303标准的生物特征数据组
-严格遵循BIT（生物信息模板）结构
-"""
-
 import struct
 import sys
 from datetime import datetime
 from typing import Optional, Tuple
 
 class DG2Generator:
-    """DG2生物特征数据组生成器"""
     
     def __init__(self):
         # 标签定义
