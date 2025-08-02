@@ -1,549 +1,444 @@
-import os
-import sys
-import argparse
-import struct
-import logging
-from datetime import datetime, timezone
-from PIL import Image, ImageOps
-import numpy as np
-from io import BytesIO
-import hashlib
-import traceback
-import dlib 
-import cv2  
-
-# JPEG2000 支持检测
-try:
-    import glymur
-    HAS_JP2_SUPPORT = True
-except ImportError:
-    HAS_JP2_SUPPORT = False
-    print("警告: 未安装 glymur 库，JPEG2000 功能将受限")
-
-# 保留 imagecodecs 作为备选
-try:
-    import imagecodecs
-    HAS_IMAGECODECS = True
-except ImportError:
-    HAS_IMAGECODECS = False
-
-# 1. 主要结构与模板标签
-DG2_TAG = 0x75
-BIOMETRIC_INFO_GROUP_TEMPLATE_TAG = 0x7F61
-BIOMETRIC_INFO_TEMPLATE_TAG = 0x7F60  # 生物特征信息模板（PyMRTD 期望的层）
-BIOMETRIC_HEADER_TEMPLATE_TAG = 0xA1
-BIOMETRIC_DATA_BLOCK_TAG = 0x5F2E
-
-# 2. 生物特征头部标签
-ICAO_HEADER_VERSION_TAG = 0x80
-BIOMETRIC_TYPE_TAG = 0x81
-BIOMETRIC_SUBTYPE_TAG = 0x82
-CREATION_DATE_TIME_TAG = 0x83
-VALIDITY_PERIOD_TAG = 0x85
-CREATOR_TAG = 0x86
-FORMAT_OWNER_TAG = 0x87
-FORMAT_TYPE_TAG = 0x88
-IMAGE_WIDTH_TAG = 0x90
-IMAGE_HEIGHT_TAG = 0x91
-FEATURE_POINTS_TAG = 0x92
-SAMPLE_NUMBER_TAG = 0x02
-
-# 3. CBEFF 头部内容常量
-CBEFF_PATRON_HEADER_VERSION = 0x0101
-BIOMETRIC_TYPE_FACIAL_FEATURES = 0x02
-BIOMETRIC_SUBTYPE_NO_INFO = 0x00
-DEFAULT_VALIDITY_YEARS = 10
-FORMAT_OWNER_ICAO = 0x0101
-FORMAT_TYPE_FACIAL_JPG = 0x0007
-FORMAT_TYPE_FACIAL_JP2 = 0x0008
-
-# 模型文件路径
-DLIB_SHAPE_PREDICTOR_PATH = "shape_predictor_68_face_landmarks.dat"
-
-# 4. 程序内部逻辑常量
-IMAGE_TYPE_JPEG = 1
-IMAGE_TYPE_JPEG2000 = 2
-
-# 5. 图像尺寸常量
-PASSPORT_PHOTO_SIZES = [
-    (300, 400),
-    (360, 480),
-    (420, 560),
-    (480, 640),
-]
-
-# ==============================================================================
-# 核心函数
-# ==============================================================================
-
-def encode_length(length: int) -> bytes:
-    """Encodes an integer length into BER-TLV length octets."""
-    if length < 0:
-        raise ValueError(f"Length cannot be negative: {length}")
-    if length < 0x80:
-        return bytes([length])
-    elif length <= 0xFF:
-        return bytes([0x81, length])
-    elif length <= 0xFFFF:
-        return bytes([0x82]) + length.to_bytes(2, 'big')
-    elif length <= 0xFFFFFF:
-        return bytes([0x83]) + length.to_bytes(3, 'big')
-    elif length <= 0xFFFFFFFF:
-        return bytes([0x84]) + length.to_bytes(4, 'big')
-    else:
-        raise ValueError(f"Length too large: {length}")
-
-def encode_tlv(tag: int, value: bytes) -> bytes:
-    """Encodes a Tag-Length-Value structure."""
-    if not isinstance(tag, int) or tag < 0:
-        raise ValueError(f"Invalid tag: {tag}")
-    if not isinstance(value, bytes):
-        raise TypeError(f"Value must be bytes, got {type(value)}")
-    
-    tag_bytes = tag.to_bytes(2, 'big') if tag > 0xFF else tag.to_bytes(1, 'big')
-    length_bytes = encode_length(len(value))
-    return tag_bytes + length_bytes + value
-
-def encode_datetime(dt: datetime) -> bytes:
-    """Encodes datetime into ICAO compact binary format."""
-    return struct.pack('>HBBBBB', dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second)
-
-def encode_validity_period(start_dt: datetime, end_dt: datetime) -> bytes:
-    """Encodes a validity period into ICAO format."""
-    start_packed = struct.pack('>HBB', start_dt.year, start_dt.month, start_dt.day)
-    end_packed = struct.pack('>HBB', end_dt.year, end_dt.month, end_dt.day)
-    return start_packed + end_packed
-
-def optimize_image_size(img: Image.Image, target_size: tuple) -> Image.Image:
-    """Resizes an image while maintaining aspect ratio using a high-quality filter."""
-    aspect = img.width / img.height
-    target_aspect = target_size[0] / target_size[1]
-    
-    if aspect > target_aspect:
-        new_width = target_size[0]
-        new_height = int(new_width / aspect)
-    else:
-        new_height = target_size[1]
-        new_width = int(new_height * aspect)
-        
-    return img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-
-def apply_preprocessing(img: Image.Image) -> Image.Image:
-    """Applies pre-processing filters to improve image quality for compression."""
-    img = ImageOps.autocontrast(img, cutoff=2)
-    from PIL import ImageFilter
-    img = img.filter(ImageFilter.UnsharpMask(radius=0.5, percent=50, threshold=0))
-    return img
-
-def convert_image_to_jpeg2000_compact(input_path, min_size, max_size):
-    """
-    符合ICAO 9303标准的JPEG2000压缩实现
-    压缩比严格限制在20:1以内
-    """
-    img = Image.open(input_path)
-    if img.mode != 'RGB':
-        img = img.convert('RGB')
-    
-    img = apply_preprocessing(img)
-
-    best_data = None
-    best_size_info = None
-    print("--- 开始JPEG2000压缩 (ICAO合规模式) ---")
-
-    # ICAO合规的压缩比范围：8:1 到 20:1
-    # 优先使用推荐范围 10:1 到 15:1
-    compression_ratios = [10, 12, 15, 8, 18, 20]  # 最大不超过20:1
-    
-    # 优先尝试 imagecodecs（如果可用）
-    if HAS_IMAGECODECS and False:  # 暂时禁用 imagecodecs，因为 level 参数不是压缩比
-        print("使用 imagecodecs 进行JPEG2000压缩...")
-        for photo_size in reversed(PASSPORT_PHOTO_SIZES):
-            resized_img = optimize_image_size(img, photo_size)
-            numpy_img = np.array(resized_img)
-            
-            for ratio in compression_ratios:
-                try:
-                    # 使用 imagecodecs 的正确参数
-                    encoded = imagecodecs.jpeg2k_encode(
-                        numpy_img,
-                        level=ratio,         # 使用 level 而不是 rate
-                        codecformat='jp2',   # JP2 格式
-                        reversible=False     # 有损压缩
-                    )
-                    size = len(encoded)
-                    print(f"    [ICAO合规] 尺寸={photo_size}, level={ratio} -> {size} 字节")
-
-                    if min_size <= size <= max_size:
-                        print(f"    ✓ 找到ICAO合规的匹配 (压缩比 {ratio}:1)")
-                        return encoded, IMAGE_TYPE_JPEG2000, resized_img.width, resized_img.height
-
-                    if size < max_size and (best_data is None or size > len(best_data)):
-                        best_data = encoded
-                        best_size_info = (resized_img.width, resized_img.height, ratio, size)
-                
-                except Exception as e:
-                    print(f"    [调试] imagecodecs 压缩失败: {e}")
-                    continue
-    
-    # 如果 imagecodecs 不可用或失败，使用 glymur 作为后备
-    if best_data is None and HAS_JP2_SUPPORT:
-        print("使用 glymur 作为后备方案...")
-        temp_path = 'temp_dg2.jp2'
-        
-        for photo_size in reversed(PASSPORT_PHOTO_SIZES):
-            resized_img = optimize_image_size(img, photo_size)
-            numpy_img = np.array(resized_img)
-            
-            for ratio in compression_ratios:
-                try:
-                    # 使用glymur保存JPEG2000
-                    glymur.Jp2k(temp_path, data=numpy_img, cratios=[ratio])
-                    
-                    # 读取文件大小
-                    size = os.path.getsize(temp_path)
-                    print(f"    [ICAO合规] 尺寸={photo_size}, cratios={ratio}:1 -> {size} 字节")
-
-                    if min_size <= size <= max_size:
-                        print(f"    ✓ 找到ICAO合规的匹配 (压缩比 {ratio}:1)")
-                        with open(temp_path, 'rb') as f:
-                            data = f.read()
-                        os.remove(temp_path)
-                        return data, IMAGE_TYPE_JPEG2000, resized_img.width, resized_img.height
-                    
-                    # 保存最接近目标的结果
-                    with open(temp_path, 'rb') as f:
-                        temp_data = f.read()
-                    
-                    if best_data is None or abs(size - (min_size + max_size) // 2) < abs(len(best_data) - (min_size + max_size) // 2):
-                        best_data = temp_data
-                        best_size_info = (resized_img.width, resized_img.height, ratio, size)
-
-                except Exception as e:
-                    print(f"    [调试] glymur 压缩失败: {e}")
-                    import traceback
-                    traceback.print_exc()
-                finally:
-                    if os.path.exists(temp_path):
-                        os.remove(temp_path)
-    
-    print("--- 压缩循环结束 ---")
-    
-    if best_data:
-        w, h, r, s = best_size_info
-        if r <= 20:  # 确保压缩比合规
-            print(f"    * 返回ICAO合规结果 ({s} 字节, 压缩比={r}:1)")
-        else:
-            print(f"    ! 警告: 压缩比 {r}:1 超过ICAO建议的20:1，但仍返回结果 ({s} 字节)")
-        
-        # 添加大小警告
-        if s < min_size:
-            print(f"    ! 警告: 文件大小 {s/1000:.1f}KB 小于目标范围 {min_size/1000:.0f}-{max_size/1000:.0f}KB")
-        elif s > max_size:
-            print(f"    ! 警告: 文件大小 {s/1000:.1f}KB 大于目标范围 {min_size/1000:.0f}-{max_size/1000:.0f}KB")
-            
-        return best_data, IMAGE_TYPE_JPEG2000, w, h
-    
-    # 如果都不可用，提示错误
-    if not HAS_IMAGECODECS and not HAS_JP2_SUPPORT:
-        raise Exception("JPEG2000支持需要 imagecodecs 或 glymur 库，请运行: pip install imagecodecs 或 pip install glymur")
-    
-    raise Exception("无法完成JPEG2000压缩")
-
-def detect_facial_feature_points(image_np: np.ndarray) -> list:
-    """
-    [NEW] Detects facial feature points using dlib, focusing on eye centers.
-    """
-    print("    分析: 正在检测面部特征点...")
-    
-    # 检查模型文件是否存在
-    if not os.path.exists(DLIB_SHAPE_PREDICTOR_PATH):
-        print(f"[错误] dlib模型文件未找到: {DLIB_SHAPE_PREDICTOR_PATH}")
-        print("       请从 http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2 下载并解压。")
-        return []
-
-    try:
-        detector = dlib.get_frontal_face_detector()
-        predictor = dlib.shape_predictor(DLIB_SHAPE_PREDICTOR_PATH)
-        
-        # dlib处理灰度图效果更好
-        gray_image = cv2.cvtColor(image_np, cv2.COLOR_RGB2GRAY)
-        
-        faces = detector(gray_image, 1)
-        
-        if not faces:
-            print("    分析: ✗ 未在图像中检测到人脸。")
-            return []
-
-        # 只处理找到的第一个人脸
-        face = faces[0]
-        landmarks = predictor(gray_image, face)
-        
-        # ICAO标准需要瞳孔中心点。dlib的68点模型提供眼眶轮廓点。
-        # 我们通过计算眼眶轮廓点的平均坐标来近似瞳孔中心。
-        
-        # 左眼轮廓点索引: 36-41
-        left_eye_points = [(landmarks.part(i).x, landmarks.part(i).y) for i in range(36, 42)]
-        left_eye_center_x = sum(p[0] for p in left_eye_points) // 6
-        left_eye_center_y = sum(p[1] for p in left_eye_points) // 6
-
-        # 右眼轮廓点索引: 42-47
-        right_eye_points = [(landmarks.part(i).x, landmarks.part(i).y) for i in range(42, 48)]
-        right_eye_center_x = sum(p[0] for p in right_eye_points) // 6
-        right_eye_center_y = sum(p[1] for p in right_eye_points) // 6
-
-        # 根据ISO/IEC 19794-5, 左眼中心类型为3, 右眼中心类型为4
-        feature_points = [
-            {'type': 0x03, 'x': left_eye_center_x, 'y': left_eye_center_y},
-            {'type': 0x04, 'x': right_eye_center_x, 'y': right_eye_center_y}
-        ]
-        
-        print(f"    分析: ✓ 检测到瞳孔中心: 左({left_eye_center_x},{left_eye_center_y}), 右({right_eye_center_x},{right_eye_center_y})")
-        return feature_points
-
-    except Exception as e:
-        print(f"    分析: ✗ 特征点检测时发生错误: {e}")
-        return []
-
-def encode_feature_points_tlv(feature_points: list) -> bytes:
-    """
-    [NEW] Encodes a list of feature points into a TLV structure (Tag 0x92).
-    """
-    if not feature_points:
-        return b''
-
-    # Value部分 = 特征点数量 (2字节) + 连续的特征点记录
-    num_points = len(feature_points)
-    value_bytes = num_points.to_bytes(2, 'big')
-    
-    for point in feature_points:
-        # 每个记录 = 类型(1字节) + X坐标(2字节) + Y坐标(2字节)
-        point_record = point['type'].to_bytes(1, 'big') + \
-                       point['x'].to_bytes(2, 'big') + \
-                       point['y'].to_bytes(2, 'big')
-        value_bytes += point_record
-        
-    return encode_tlv(FEATURE_POINTS_TAG, value_bytes)
-
-
-def create_biometric_header_template(width: int, height: int, image_type: int, feature_points: list = None) -> bytes:
-    """
-    [v2.1 with Feature Points] Creates the A1 header with all metadata.
-    """
-    now = datetime.now(timezone.utc)
-    validity_end = now.replace(year=now.year + DEFAULT_VALIDITY_YEARS)
-
-    header_items = [
-        # ... (此处的其他静态头部项保持不变) ...
-        encode_tlv(ICAO_HEADER_VERSION_TAG, struct.pack('>H', CBEFF_PATRON_HEADER_VERSION)),
-        encode_tlv(BIOMETRIC_TYPE_TAG, bytes([BIOMETRIC_TYPE_FACIAL_FEATURES])),
-        encode_tlv(BIOMETRIC_SUBTYPE_TAG, bytes([BIOMETRIC_SUBTYPE_NO_INFO])),
-        encode_tlv(CREATION_DATE_TIME_TAG, encode_datetime(now)),
-        encode_tlv(VALIDITY_PERIOD_TAG, encode_validity_period(now, validity_end)),
-        encode_tlv(CREATOR_TAG, b'ePassportGen'),
-        encode_tlv(FORMAT_OWNER_TAG, struct.pack('>H', FORMAT_OWNER_ICAO)),
-    ]
-    
-    format_type_value = FORMAT_TYPE_FACIAL_JP2 if image_type == IMAGE_TYPE_JPEG2000 else FORMAT_TYPE_FACIAL_JPG
-    header_items.append(encode_tlv(FORMAT_TYPE_TAG, struct.pack('>H', format_type_value)))
-
-    header_items.append(encode_tlv(IMAGE_WIDTH_TAG, width.to_bytes(2, 'big')))
-    header_items.append(encode_tlv(IMAGE_HEIGHT_TAG, height.to_bytes(2, 'big')))
-
-    # 【核心修改】如果传入了特征点，就编码并添加
-    if feature_points:
-        header_items.append(encode_feature_points_tlv(feature_points))
-
-    header_content = b''.join(header_items)
-    return encode_tlv(BIOMETRIC_HEADER_TEMPLATE_TAG, header_content)
-
-def create_biometric_data_block(image_data: bytes) -> bytes:
-    """[v2.0] Wraps the raw image data into a Biometric Data Block (5F2E)."""
-    if not isinstance(image_data, bytes) or not image_data:
-        raise ValueError("Invalid image data provided to create_biometric_data_block.")
-    return encode_tlv(BIOMETRIC_DATA_BLOCK_TAG, image_data)
-
-def validate_and_extract_dg2_strict(dg2_data: bytes, output_prefix="extracted") -> tuple[bool, str, int]:
-    """
-    [NEW] Validates the strict, compliant DG2 structure and extracts the image.
-    Structure: 75 -> 7F61 -> (02 + 7F60 -> (A1 + 5F2E))
-    """
-    print("    验证: 正在使用严格模式验证DG2结构...")
-    try:
-        # A simple TLV parser
-        def parse_tlv(data):
-            offset = 0
-            tlv_map = {}
-            while offset < len(data):
-                tag = data[offset]
-                if tag & 0x1F == 0x1F: # Multi-byte tag
-                    tag = (tag << 8) | data[offset+1]
-                    offset += 2
-                else:
-                    offset += 1
-                
-                length = data[offset]
-                offset += 1
-                if length & 0x80:
-                    len_bytes = length & 0x7F
-                    length = int.from_bytes(data[offset:offset+len_bytes], 'big')
-                    offset += len_bytes
-                
-                value = data[offset:offset+length]
-                tlv_map[tag] = value
-                offset += length
-            return tlv_map
-
-        # 1. Parse DG2 (Tag 75)
-        if dg2_data[0] != DG2_TAG: raise ValueError("DG2 does not start with 0x75")
-        dg2_content = parse_tlv(dg2_data)[DG2_TAG]
-
-        # 2. Parse Biometric Info Group (Tag 7F61)
-        if not dg2_content.startswith(b'\x7F\x61'): raise ValueError("0x75 does not contain 0x7F61")
-        group_content = parse_tlv(dg2_content)[BIOMETRIC_INFO_GROUP_TEMPLATE_TAG]
-        
-        # 3. Parse content of 7F61
-        parsed_group = parse_tlv(group_content)
-        
-        # Check for biometric info template (7F60)
-        if BIOMETRIC_INFO_TEMPLATE_TAG in parsed_group:
-            # New structure with 7F60 layer
-            biometric_info = parse_tlv(parsed_group[BIOMETRIC_INFO_TEMPLATE_TAG])
-            if BIOMETRIC_DATA_BLOCK_TAG not in biometric_info:
-                raise ValueError("0x7F60 does not contain Biometric Data Block (0x5F2E)")
-            image_data = biometric_info[BIOMETRIC_DATA_BLOCK_TAG]
-        elif BIOMETRIC_DATA_BLOCK_TAG in parsed_group:
-            # Old structure without 7F60 layer (for backward compatibility)
-            image_data = parsed_group[BIOMETRIC_DATA_BLOCK_TAG]
-        else:
-            raise ValueError("Cannot find Biometric Data Block (0x5F2E)")
-        
-        # 4. Save and verify extracted image
-        image_ext = "jp2"
-        extracted_path = f"{output_prefix}.{image_ext}"
-        with open(extracted_path, 'wb') as f:
-            f.write(image_data)
-        
-        img = Image.open(BytesIO(image_data))
-        print(f"    验证: ✓ 结构合规，成功提取图像 ({img.width}x{img.height}) -> {extracted_path}")
-        return True, extracted_path, len(image_data)
-
-    except Exception as e:
-        print(f"    验证: ✗ DG2结构验证失败: {e}")
-        return False, None, 0
-
-def generate_dg2_compact(image_path, output_path='DG2.bin', size_mode='compact'):
-    """
-    [v2.0 Final] Generates a fully ICAO 9303 compliant DG2 file.
-    """
-    print(f"--> 生成DG2: {os.path.basename(image_path)} -> {output_path}")
-
-    if size_mode == 'compact':
-        min_size, max_size = 10000, 15000
-    elif size_mode == 'normal':
-        min_size, max_size = 15000, 20000
-    else: # quality
-        min_size, max_size = 20000, 30000
-    print(f"    目标: {min_size/1000:.0f}-{max_size/1000:.0f}KB ({size_mode})")
-
-    try:
-        print("    压缩: 正在生成 JPEG2000 图像...")
-        image_data, image_type, width, height = convert_image_to_jpeg2000_compact(
-            image_path, min_size, max_size
-        )
-        format_name = "JPEG2000"
-        print(f"    压缩: ✓ {len(image_data)/1000:.1f}KB {format_name} ({width}x{height})")
-        
-        # 【新增调用】在得到图像数据后，立即进行特征点检测
-        # 我们需要一个未压缩的numpy数组来进行检测
-        pil_image = Image.open(BytesIO(image_data))
-        numpy_image_for_detection = np.array(pil_image)
-        feature_points = detect_facial_feature_points(numpy_image_for_detection)
-
-    except Exception as e:
-        print(f"[错误] 图像处理失败: {e}")
-        traceback.print_exc()
-        return False
-
-    print("    组装: 正在构建合规的DG2结构...")
-    # 【修改调用】将 feature_points 传递给header创建函数
-    biometric_header = create_biometric_header_template(width, height, image_type, feature_points)
-    biometric_data = create_biometric_data_block(image_data)
-    
-    # 构建生物特征信息模板 (7F60) - PyMRTD 期望的结构
-    biometric_info_content = biometric_header + biometric_data
-    biometric_info_template = encode_tlv(BIOMETRIC_INFO_TEMPLATE_TAG, biometric_info_content)
-    
-    # 生物特征实例数量
-    sample_number = encode_tlv(SAMPLE_NUMBER_TAG, b'\x01')
-    
-    # 构建生物特征信息组模板 (7F61)
-    biometric_info_group_content = sample_number + biometric_info_template
-    biometric_info_group = encode_tlv(BIOMETRIC_INFO_GROUP_TEMPLATE_TAG, biometric_info_group_content)
-    
-    # 最终的 DG2 结构
-    dg2 = encode_tlv(DG2_TAG, biometric_info_group)
-    print("    组装: ✓ DG2结构构建完成")
-
-    with open(output_path, 'wb') as f:
-        f.write(dg2)
-    
-    overhead = len(dg2) - len(image_data)
-    checksum = hashlib.sha256(dg2).hexdigest()
-    
-    print(f"--> DG2生成成功: {len(dg2)/1000:.1f}KB (数据开销: {overhead}字节)")
-    print(f"    SHA256校验和: {checksum}")
-    
-    # 【已修正】调用新的验证函数
-    extract_success, extracted_path, extracted_size = validate_and_extract_dg2_strict(
-        dg2, output_path.replace('.bin', '_extracted')
-    )
-    
-    info_content = f"""DG2 Generation Report
----------------------------------
-Generation Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-Source File:     {image_path}
-Output File:     {output_path}
-Format:          {format_name}
-Dimensions:      {width}x{height}
-DG2 Size:        {len(dg2)} bytes
-Image Size:      {len(image_data)} bytes
-Overhead:        {overhead} bytes
-SHA256:          {checksum}
-Extraction Test: {'SUCCESS' if extract_success else 'FAILED'}
+#!/usr/bin/env python3
 """
+DG2生成器 - 基于ICAO 9303标准的生物特征数据组
+严格遵循BIT（生物信息模板）结构
+"""
+
+import struct
+import sys
+from datetime import datetime
+from typing import Optional, Tuple
+
+class DG2Generator:
+    """DG2生物特征数据组生成器"""
     
-    with open(output_path + ".info", "w", encoding='utf-8') as f:
-        f.write(info_content)
+    def __init__(self):
+        # 标签定义
+        self.TAG_DG2 = 0x75
+        self.TAG_BIT_GROUP = 0x7F61
+        self.TAG_INSTANCE_COUNT = 0x02
+        self.TAG_BIT = 0x7F60
+        self.TAG_BHT = 0xA1
+        self.TAG_ICAO_VERSION = 0x80
+        self.TAG_BIOMETRIC_TYPE = 0x81
+        self.TAG_BIOMETRIC_SUBTYPE = 0x82
+        self.TAG_CREATE_DATETIME = 0x83
+        self.TAG_UNKNOWN_84 = 0x84  # 真实护照中的未知字段
+        self.TAG_VALIDITY_PERIOD = 0x85
+        self.TAG_CREATOR_PID = 0x86
+        self.TAG_FORMAT_OWNER = 0x87
+        self.TAG_FORMAT_TYPE = 0x88
+        self.TAG_BDB = 0x5F2E
+        
+        # 生物特征类型常量
+        self.BIOMETRIC_TYPE_FACE = 0x02
+        self.BIOMETRIC_SUBTYPE_FRONTAL = 0x00
+        
+        # 格式常量
+        self.FORMAT_OWNER_ISO = 0x0101
+        self.FORMAT_TYPE_JPEG = 0x0001
+        self.FORMAT_TYPE_FAC = 0x0008  # FAC格式（真实护照使用）
+        
+    def encode_length(self, length: int) -> bytes:
+        """BER-TLV长度编码"""
+        if length < 128:
+            return bytes([length])
+        elif length < 256:
+            return bytes([0x81, length])
+        elif length < 65536:
+            return bytes([0x82, length >> 8, length & 0xFF])
+        else:
+            return bytes([0x83, length >> 16, (length >> 8) & 0xFF, length & 0xFF])
     
-    print(f"    报告: ✓ 已生成报告文件 -> {output_path}.info")
-    return True
+    def encode_tag(self, tag: int) -> bytes:
+        """编码标签（支持单字节和双字节）"""
+        if tag <= 0xFF:
+            return bytes([tag])
+        else:
+            return bytes([tag >> 8, tag & 0xFF])
+    
+    def encode_tlv(self, tag: int, value: bytes) -> bytes:
+        """创建TLV结构"""
+        tag_bytes = self.encode_tag(tag)
+        length_bytes = self.encode_length(len(value))
+        return tag_bytes + length_bytes + value
+    
+    def create_bht(self,
+                   icao_version: bytes = None,
+                   biometric_type: int = None,
+                   biometric_subtype: int = None,
+                   create_datetime: datetime = None,
+                   validity_period: Tuple[datetime, datetime] = None,
+                   creator_pid: int = None,
+                   format_owner: int = None,
+                   format_type: int = None,
+                   use_fac_format: bool = False) -> bytes:
+        """创建生物头模板(BHT)"""
+        bht_content = b''
+        
+        # 可选字段
+        if icao_version is not None:
+            bht_content += self.encode_tlv(self.TAG_ICAO_VERSION, icao_version)
+        
+        if biometric_type is not None:
+            bht_content += self.encode_tlv(self.TAG_BIOMETRIC_TYPE, bytes([biometric_type]))
+        
+        if biometric_subtype is not None:
+            bht_content += self.encode_tlv(self.TAG_BIOMETRIC_SUBTYPE, bytes([biometric_subtype]))
+        
+        # 创建日期时间字段 (TAG 83)
+        if use_fac_format:
+            # FAC 真护照模式：必须是 7 字节全 0x00
+            bht_content += self.encode_tlv(self.TAG_CREATE_DATETIME, b'\x00' * 7)
+        elif create_datetime:
+            # 非 FAC 模式，按真实时间编码为 BCD
+            dt_str = create_datetime.strftime('%Y%m%d%H%M%S')
+            dt_bytes = bytes([int(dt_str[i:i+2], 16) for i in range(0, len(dt_str), 2)])
+            bht_content += self.encode_tlv(self.TAG_CREATE_DATETIME, dt_bytes)
+        
+        if validity_period:
+            # 编码有效期（从-到）
+            from_dt = validity_period[0].strftime('%Y%m%d')
+            to_dt = validity_period[1].strftime('%Y%m%d')
+            period_str = from_dt + to_dt
+            # BCD编码
+            period_bytes = bytes([int(period_str[i:i+2], 16) for i in range(0, len(period_str), 2)])
+            bht_content += self.encode_tlv(self.TAG_VALIDITY_PERIOD, period_bytes)
+        
+        # FAC 模式优先插入未知字段 84，再插入 PID，顺序与真实护照一致
+        if use_fac_format:
+            bht_content += self.encode_tlv(self.TAG_UNKNOWN_84, b'\x00\x00\x00\x00\x00\x00\x00\x00')
+        
+        if creator_pid is not None:
+            # 大端序编码
+            if creator_pid == 0:
+                # 按真实护照：长度应为 2 字节 00 00
+                pid_bytes = b'\x00\x00'
+            else:
+                pid_bytes = struct.pack('>I', creator_pid)
+                # 去除前导零但保留至少 2 字节
+                while len(pid_bytes) > 2 and pid_bytes[0] == 0:
+                    pid_bytes = pid_bytes[1:]
+            bht_content += self.encode_tlv(self.TAG_CREATOR_PID, pid_bytes)
+        
+        # 必需字段
+        if format_owner is None:
+            format_owner = self.FORMAT_OWNER_ISO
+        bht_content += self.encode_tlv(self.TAG_FORMAT_OWNER, struct.pack('>H', format_owner))
+        
+        if format_type is None:
+            format_type = self.FORMAT_TYPE_JPEG
+        bht_content += self.encode_tlv(self.TAG_FORMAT_TYPE, struct.pack('>H', format_type))
+        
+        return self.encode_tlv(self.TAG_BHT, bht_content)
+    
+    def create_bit(self, image_data: bytes, use_fac_format: bool = False, **bht_kwargs) -> bytes:
+        """创建单个生物信息模板(BIT)"""
+        # 根据格式类型处理图像数据
+        if use_fac_format:
+            # 使用FAC格式
+            processed_data = jpeg_to_fac_format(image_data)
+            # 确保BHT中的格式类型正确
+            if 'format_type' not in bht_kwargs:
+                bht_kwargs['format_type'] = self.FORMAT_TYPE_FAC
+        else:
+            # 使用标准JPEG格式
+            processed_data = image_data
+            if 'format_type' not in bht_kwargs:
+                bht_kwargs['format_type'] = self.FORMAT_TYPE_JPEG
+        
+        # 创建生物头模板
+        bht_kwargs['use_fac_format'] = use_fac_format
+        bht = self.create_bht(**bht_kwargs)
+        
+        # 创建生物数据块(BDB)
+        bdb = self.encode_tlv(self.TAG_BDB, processed_data)
+        
+        # 组合BHT和BDB
+        bit_content = bht + bdb
+        
+        return self.encode_tlv(self.TAG_BIT, bit_content)
+    
+    def generate_dg2(self, jpeg_images: list, use_fac_format: bool = False, **kwargs) -> bytes:
+        """
+        生成完整的DG2数据
+        
+        参数:
+            jpeg_images: JPEG图像数据列表
+            use_fac_format: 是否使用FAC格式（真实护照格式）
+            kwargs: 传递给BHT的其他参数
+        
+        返回:
+            完整的DG2数据
+        """
+        if not jpeg_images:
+            raise ValueError("At least one JPEG image is required")
+        
+        if len(jpeg_images) > 9:
+            raise ValueError("Maximum 9 biometric instances allowed")
+        
+        # 生物特征实例计数
+        instance_count = self.encode_tlv(self.TAG_INSTANCE_COUNT, bytes([len(jpeg_images)]))
+        
+        # 生成所有生物信息模板
+        bits = b''
+        for i, jpeg_data in enumerate(jpeg_images):
+            # 为每个图像设置默认参数
+            bit_kwargs = kwargs.copy()
+            if 'biometric_type' not in bit_kwargs:
+                bit_kwargs['biometric_type'] = self.BIOMETRIC_TYPE_FACE
+            if 'biometric_subtype' not in bit_kwargs:
+                bit_kwargs['biometric_subtype'] = self.BIOMETRIC_SUBTYPE_FRONTAL
+            
+            bits += self.create_bit(jpeg_data, use_fac_format=use_fac_format, **bit_kwargs)
+        
+        # 组合成生物信息组模板
+        bit_group_content = instance_count + bits
+        bit_group = self.encode_tlv(self.TAG_BIT_GROUP, bit_group_content)
+        
+        # 最终的DG2
+        dg2 = self.encode_tlv(self.TAG_DG2, bit_group)
+        
+        return dg2
+
+
+def jpeg_to_fac_format(jpeg_data: bytes) -> bytes:
+    """将JPEG转换为FAC格式 (按照真实护照规则)"""
+    try:
+        import io, tempfile, os, struct
+        from PIL import Image
+        import numpy as np
+        import glymur
+        
+        # ------------- 1. 读取 / 归一化图像 -------------
+        img = Image.open(io.BytesIO(jpeg_data))
+        # 护照典型尺寸 413×531，但各国固件通常只校验 header 尺寸与 JP2 实际一致
+        width, height = img.size
+        
+        # ------------- 2. 使用 glymur 生成 JP2 数据 -------------
+        # glymur 只能写文件，使用 NamedTemporaryFile
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.jp2') as tmp:
+            jp2_path = tmp.name
+        try:
+            glymur.Jp2k(jp2_path, data=np.asarray(img))
+            with open(jp2_path, 'rb') as f:
+                jp2_data = f.read()
+        finally:
+            os.remove(jp2_path)
+        
+        # ------------- 3. 构造 FAC header -------------
+        fac_data = bytearray()
+        fac_data.extend(b'FAC\x00')      # 魔术字符串
+        fac_data.extend(b'010\x00')      # 版本号 "010\0"
+        length_offset = len(fac_data)     # 记录 length 字段位置
+        fac_data.extend(b'\x00\x00\x00\x00')  # 4 字节长度 (小端)
+        fac_data.extend(b'\x00\x01\x00\x00')  # 未知固定字段
+        fac_data.extend(b'\x50\x20\x00\x00')  # 格式/flag
+        fac_data.extend(b'\x00' * 16)            # padding
+        
+        # 图像尺寸信息 (offset 0x60 起)
+        fac_data.extend(b'\x00\x00\x00\x00')  # 占位
+        fac_data.extend(b'\x01\x01')            # format id
+        fac_data.extend(struct.pack('>H', width))
+        fac_data.extend(struct.pack('>H', height))
+        
+        # 固定标记、JP2 magic
+        fac_data.extend(b'\x00\x00\x00\x00\x00\x5A')
+        fac_data.extend(b'\xFF\x4F\xFF\x51\x00\x2F')
+        
+        # padding 至 0x70
+        while len(fac_data) < 0x70:
+            fac_data.append(0x00)
+        
+        # ------------- 4. 追加 JP2 数据 -------------
+        fac_data.extend(jp2_data)
+        
+        # ------------- 5. 回填 FAC length -------------
+        total_length = len(fac_data)            # 真护照写的是 header 后全部字节总长
+        struct.pack_into('<I', fac_data, length_offset, total_length)
+        
+        return bytes(fac_data)
+    except Exception as e:
+        print(f"警告：无法转换为FAC格式 - {e}")
+        return jpeg_data
+
+
+def compress_jpeg_to_size(image_data: bytes, target_min: int, target_max: int) -> bytes:
+    """压缩JPEG到指定大小范围"""
+    try:
+        from PIL import Image
+        import io
+    except ImportError:
+        print("警告：无法压缩图像，需要PIL库")
+        return image_data
+    
+    # 读取图像
+    img = Image.open(io.BytesIO(image_data))
+    
+    # 二分搜索找到合适的质量
+    low_quality = 10
+    high_quality = 95
+    best_data = image_data
+    
+    while low_quality <= high_quality:
+        mid_quality = (low_quality + high_quality) // 2
+        
+        # 压缩图像
+        buffer = io.BytesIO()
+        img.save(buffer, format='JPEG', quality=mid_quality, optimize=True)
+        compressed = buffer.getvalue()
+        
+        size = len(compressed)
+        
+        if target_min <= size <= target_max:
+            # 找到合适的大小
+            return compressed
+        elif size < target_min:
+            # 质量太低，需要提高
+            low_quality = mid_quality + 1
+            if size > len(best_data) and size < target_max:
+                best_data = compressed
+        else:
+            # 质量太高，需要降低
+            high_quality = mid_quality - 1
+            if target_min <= size <= target_max * 1.1:  # 允许10%的容差
+                best_data = compressed
+    
+    # 如果无法通过调整质量达到目标，尝试调整尺寸
+    if len(best_data) > target_max:
+        scale = 0.9
+        while len(best_data) > target_max and scale > 0.5:
+            new_size = (int(img.width * scale), int(img.height * scale))
+            resized = img.resize(new_size, Image.Resampling.LANCZOS)
+            
+            buffer = io.BytesIO()
+            resized.save(buffer, format='JPEG', quality=85, optimize=True)
+            best_data = buffer.getvalue()
+            
+            scale -= 0.05
+    
+    return best_data
+
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="生成符合ICAO 9303标准的DG2文件 (JP2000-only).",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-示例:
-  python gen_dg2.py photo.jpg --size compact
-  python gen_dg2.py C:\\Users\\User\\Desktop\\face.png --out MyDG2.bin --size normal
-"""
-    )
-    parser.add_argument('image', help='输入图像文件路径')
-    parser.add_argument('--size', choices=['compact', 'normal', 'quality'],
-                       default='compact', help='尺寸模式 (影响目标文件大小)')
-    parser.add_argument('--out', default='DG2.bin', help='输出文件路径')
+    """示例用法"""
+    import os
     
-    args = parser.parse_args()
+    # 创建生成器
+    generator = DG2Generator()
     
-    if not os.path.exists(args.image):
-        print(f"[错误] 文件不存在: {args.image}")
-        sys.exit(1)
+    # 获取压缩档位
+    if len(sys.argv) > 1:
+        try:
+            level = int(sys.argv[1])
+            if level == 1:
+                target_min, target_max = 10000, 12000
+                print("使用低档位压缩 (10-12KB)")
+            elif level == 3:
+                target_min, target_max = 18000, 20000
+                print("使用高档位压缩 (18-20KB)")
+            else:
+                target_min, target_max = 14000, 16000
+                print("使用中档位压缩 (14-16KB)")
+        except ValueError:
+            target_min, target_max = 14000, 16000
+            print("使用默认中档位压缩 (14-16KB)")
+    else:
+        target_min, target_max = 14000, 16000
+        print("使用默认中档位压缩 (14-16KB)")
     
-    generate_dg2_compact(
-        args.image, 
-        args.out, 
-        args.size
-    )
+    # 检查图像文件是否存在
+    image_files = ['dg2.png', 'dg2.jpg', 'dg2.jpeg']
+    image_data = None
+    used_file = None
+    
+    for filename in image_files:
+        if os.path.exists(filename):
+            # 如果是PNG，需要转换为JPEG
+            if filename.endswith('.png'):
+                try:
+                    from PIL import Image
+                    import io
+                    img = Image.open(filename)
+                    # 转换为RGB（如果是RGBA）
+                    if img.mode == 'RGBA':
+                        rgb_img = Image.new('RGB', img.size, (255, 255, 255))
+                        rgb_img.paste(img, mask=img.split()[3])
+                        img = rgb_img
+                    elif img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    # 保存为JPEG格式到内存
+                    jpeg_buffer = io.BytesIO()
+                    img.save(jpeg_buffer, format='JPEG', quality=95)
+                    image_data = jpeg_buffer.getvalue()
+                except ImportError:
+                    print("需要PIL库来转换PNG。请安装: pip install Pillow")
+                    return
+            else:
+                # 直接读取JPEG文件
+                with open(filename, 'rb') as f:
+                    image_data = f.read()
+            used_file = filename
+            break
+    
+    if image_data is None:
+        print("未找到图像文件。请提供以下任一文件：")
+        print("- dg2.png")
+        print("- dg2.jpg") 
+        print("- dg2.jpeg")
+        return
+    
+    print(f"使用图像文件: {used_file}")
+    print(f"原始图像大小: {len(image_data)} 字节 ({len(image_data)//1024}KB)")
+    
+    # 压缩图像到目标大小
+    compressed_data = compress_jpeg_to_size(image_data, target_min, target_max)
+    print(f"压缩后大小: {len(compressed_data)} 字节 ({len(compressed_data)//1024}KB)")
+    
+    # 强制使用 FAC 真护照模式
+    use_fac = True
+    print("使用 FAC 真护照模式")
 
-if __name__ == '__main__':
+    # 生成DG2，FAC 参数匹配真实护照
+    dg2_data = generator.generate_dg2(
+        [compressed_data],
+        use_fac_format=True,
+        icao_version=b'\x01\x00',          # FAC 规定 0100
+        biometric_type=0x02,
+        biometric_subtype=0x00,
+        # create_datetime 省略 → 函数内部写 7B 00
+        creator_pid=0,
+        format_owner=0x0101
+    )
+    
+    # 保存DG2数据
+    with open('dg2.bin', 'wb') as f:
+        f.write(dg2_data)
+    
+    print(f"DG2生成成功，大小: {len(dg2_data)} 字节")
+    print(f"已保存到: dg2.bin")
+    
+    # 显示结构
+    print("\nDG2结构:")
+    print(f"75 (DG2) [{len(dg2_data)} 字节]")
+    print(f"└── 7F61 (BIT Group)")
+    print(f"    ├── 02 (Instance Count) = 1")
+    print(f"    └── 7F60 (BIT)")
+    print(f"        ├── A1 (BHT)")
+    print(f"        │   ├── 80 (ICAO Version) = {('0100' if use_fac else '0101')}")
+    print(f"        │   ├── 81 (Biometric Type) = 02 (Face)")
+    print(f"        │   ├── 82 (Biometric Subtype) = 00 (Frontal)")
+    if not use_fac:
+        print(f"        │   ├── 83 (Create DateTime)")
+        print(f"        │   ├── 86 (Creator PID) = 1234")
+    else:
+        print(f"        │   ├── 83 (Create DateTime) = 20000101000000")
+        print(f"        │   ├── 84 (Unknown Field)")
+        print(f"        │   ├── 86 (Creator PID) = 0")
+    print(f"        │   ├── 87 (Format Owner) = 0101 (ISO)")
+    print(f"        │   └── 88 (Format Type) = {('0008 (FAC)' if use_fac else '0001 (JPEG)')}")
+    print(f"        └── 5F2E (BDB) [{len(compressed_data)} 字节 {'FAC' if use_fac else 'JPEG'}]")
+
+
+if __name__ == "__main__":
     main()
