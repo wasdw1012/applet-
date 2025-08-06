@@ -1,13 +1,13 @@
 
 #资产定位全面侦察
 
-
 import asyncio
 import aiohttp
 import json
 import logging
 import subprocess
 import time
+import os
 from datetime import datetime
 from urllib.parse import urlparse, urljoin
 from typing import Dict, List, Set, Optional, Any
@@ -751,11 +751,13 @@ class AssetMapper:
     def __init__(self, target_domain: str, config: AssetMapperConfig = None, auth_config=None,
                  enable_chain_tracking: bool = True, chain_config: ChainTrackingConfig = None):
         self.target = target_domain
+        self.target_domain = target_domain  # 为兼容性添加
         self.config = config or AssetMapperConfig()
         self.results = ScanResult()
         self.session: Optional[aiohttp.ClientSession] = None
         self.domain_protocols: Dict[str, str] = {}  # 缓存域名协议信息
         self.start_time = time.time()
+        self.output_dir = "output"  # 输出目录
         
         # 🚀 史诗级链式追踪管理器
         self.enable_chain_tracking = enable_chain_tracking
@@ -3274,44 +3276,176 @@ class AssetMapper:
             except Exception as e:  # 注意：需要 import logging
                         
                 logging.warning(f"异常被忽略: {type(e).__name__}: {str(e)}")
+    
+    #概念#概念#概念#概念#概念#概念#概念#概念
     def generate_report(self):
-        """生成扫描报告 - 树状关联模型版"""
-        # 🌟 首先计算所有资产的风险评分
-        self.results.calculate_risk_scores()
+        """
+        生成最终的"攻击面战略地图"，将所有发现按资产进行结构化关联。
+        """
+        print("\n[+] 正在生成攻击面战略地图...")
         
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        report_file = f"asset_report_{self.target}_{timestamp}.json"
-        
-        # 准备报告数据
+        # 1. 构建核心的、结构化的攻击面地图
+        attack_surface = self._build_attack_surface()
+
+        # 2. 生成报告元数据
         report_data = {
-            "scan_info": {
-                "target": self.target,
-                "timestamp": datetime.now().isoformat(),
-                "scan_duration": f"{time.time() - self.start_time:.2f}s",
-                "config": {
-                    "max_crawl_pages": self.config.max_crawl_pages,
-                    "max_js_files": self.config.max_js_files,
-                    "concurrent_limit": self.config.concurrent_limit
-                }
+            "scan_metadata": {
+                "target": self.target_domain,
+                "scan_timestamp_utc": datetime.now().isoformat(),
+                "scan_duration_seconds": f"{time.time() - self.start_time:.2f}",
+                "scanner": "AssetMapper v1.0 (Correlated Model)"
             },
-            "results": self.results.to_dict(),
-            "summary": self._generate_summary(),
-            "high_priority_targets": self._identify_high_priority_targets(),
-            "waf_protection_stats": self._get_waf_stats()
+            "attack_surface": attack_surface,
+            "summary": {
+                "total_assets_identified": len(attack_surface),
+                "total_endpoints_found": sum(len(asset.get("endpoints", [])) for asset in attack_surface.values()),
+                "total_sensitive_files": sum(len(asset.get("sensitive_files", [])) for asset in attack_surface.values()),
+            }
         }
-        
-        # 保存JSON报告
+
+        # 3. 保存报告文件
         try:
-            with open(report_file, 'w', encoding='utf-8') as f:
-                json.dump(report_data, f, ensure_ascii=False, indent=2, default=str)
+            # 确保输出目录存在
+            os.makedirs(self.output_dir, exist_ok=True)
             
-            logger.info(f"报告已保存: {report_file}")
-            
-            # 输出高优先级发现
-            self._print_priority_findings()
-            
+            report_json_path = os.path.join(self.output_dir, "asset_map_report.json")
+            with open(report_json_path, 'w', encoding='utf-8') as f:
+                json.dump(report_data, f, ensure_ascii=False, indent=4, default=str)
+            print(f"    [+] 结构化战略地图已保存: {report_json_path}")
+
         except Exception as e:
-            logger.error(f"报告生成失败: {type(e).__name__}: {e}")
+            print(f"    [!] 报告保存失败: {e}")
+
+        # 4. 在控制台打印高级摘要
+        self._print_attack_surface_summary(attack_surface)
+
+    def _build_attack_surface(self) -> dict:
+        """
+        【核心函数】构建结构化的攻击面地图。
+        """
+        surface = {}
+
+        # 步骤1: 初始化所有资产 (主域名和子域名)
+        # 首先添加主目标
+        main_protocol = next((p['protocol'] for p in self.results.subdomains if p['domain'] == self.target_domain), 'https')
+        surface[self.target_domain] = {
+            "asset_type": "main_domain",
+            "protocol": main_protocol,
+            "endpoints": [],
+            "sensitive_files": [],
+            "forms": [],
+                "technologies": [],
+            "js_findings": []
+        }
+        # 添加所有子域名
+        for asset in self.results.subdomains:
+            domain = asset['domain']
+            if domain not in surface:
+                surface[domain] = {
+                    "asset_type": "subdomain",
+                    "protocol": asset['protocol'],
+                "endpoints": [],
+                    "sensitive_files": [],
+                    "forms": [],
+                    "technologies": [],
+                    "js_findings": []
+                }
+
+        # 步骤2: 遍历所有发现，将它们归档到对应的资产下
+        # 归档后台路径和高风险端点
+        for panel in self.results.admin_panels:
+            parent_asset = urlparse(panel['url']).netloc
+            if parent_asset in surface:
+                surface[parent_asset]['endpoints'].append({
+                    "path": urlparse(panel['url']).path or '/',
+                    "status": panel.get('status'),
+                    "risk_level": panel.get('risk_level', 'medium'),
+                    "source": "path_scan"
+                })
+                
+        # 归档敏感文件
+        for file_info in getattr(self.results, 'files', []):
+            parent_asset = urlparse(file_info['url']).netloc
+            if parent_asset in surface:
+                surface[parent_asset]['sensitive_files'].append({
+                    "path": urlparse(file_info['url']).path,
+                    "risk_level": file_info.get('risk_level', 'high'),
+                    "size_bytes": file_info.get('size'),
+                    "content_type": file_info.get('content_type')
+                })
+
+        # 归档表单
+        for form in getattr(self.results, 'forms', []):
+            parent_asset = urlparse(form['url']).netloc
+            if parent_asset in surface:
+                surface[parent_asset]['forms'].append({
+                    "path": urlparse(form['url']).path,
+                    "action": form.get('action'),
+                    "method": form.get('method'),
+                    "type": form.get('form_type')
+                })
+        
+        # 归档JS中的发现
+        for finding in getattr(self.results, 'api_routes', []): # 假设JS发现都在api_routes
+            parent_asset = urlparse(finding['source']).netloc
+            if parent_asset in surface:
+                 surface[parent_asset]['js_findings'].append({
+                    "finding_type": finding.get('type'),
+                    "content": finding.get('route'),
+                    "risk_level": finding.get('risk_level', 'medium'),
+                    "source_js": finding.get('source')
+                 })
+
+        # 归档技术栈 (假设每个tech finding都有一个source url)
+        for tech in self.results.technologies:
+            # 这是一个简化的例子，你可能需要调整tech的数据结构来更好地关联
+            parent_asset = urlparse(tech.get('source', self.target_domain)).netloc 
+            if parent_asset in surface:
+                 surface[parent_asset]['technologies'].append(tech.get('name'))
+
+        return surface
+
+    def _print_attack_surface_summary(self, attack_surface: dict):
+        """在控制台打印高级摘要"""
+        print("\n" + "="*80)
+        print("                    攻击面战略地图摘要 (Attack Surface Briefing)")
+        print("="*80)
+        
+        # 按重要性排序资产（例如，有高风险发现的优先）
+        sorted_assets = sorted(
+            attack_surface.items(),
+            key=lambda item: len(item[1].get('endpoints', [])) + len(item[1].get('sensitive_files', [])),
+            reverse=True
+        )
+
+        for asset_name, asset_data in sorted_assets:
+            print(f"\n📍 **资产: {asset_name} ({asset_data.get('protocol', 'http')}://)**")
+            
+            technologies = asset_data.get('technologies')
+            if technologies:
+                print(f"   - **技术栈**: {', '.join(list(set(technologies)))}")
+            
+            endpoints = asset_data.get('endpoints')
+            if endpoints:
+                print(f"   - **高危端点 ({len(endpoints)}):**")
+                for endpoint in endpoints[:3]: # 最多显示3个
+                    print(f"     - ` {endpoint['path']} ` (Status: {endpoint['status']}, Risk: {endpoint['risk_level']})")
+            
+            sensitive_files = asset_data.get('sensitive_files')
+            if sensitive_files:
+                print(f"   - **敏感文件 ({len(sensitive_files)}):**")
+                for file in sensitive_files[:3]:
+                     print(f"     - ` {file['path']} ` (Risk: {file['risk_level']})")
+
+            js_findings = asset_data.get('js_findings')
+            if js_findings:
+                critical_js = [f for f in js_findings if f.get('risk_level') == 'critical']
+                if critical_js:
+                    print(f"   - **🚨 JS泄露 ({len(critical_js)}):**")
+                    for finding in critical_js[:2]:
+                        print(f"     - **{finding['finding_type']}**: `{str(finding['content'])[:50]}...`")
+
+        print("\n" + "="*80)
     
     def _generate_summary(self) -> Dict:
         """生成扫描摘要 - 树状关联模型版"""
