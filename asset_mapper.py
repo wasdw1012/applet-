@@ -487,26 +487,196 @@ class RequestBypassEnhancer:
 
 @dataclass
 class ScanResult:
-    """扫描结果数据结构"""
-    endpoints: List[Dict] = field(default_factory=list)
-    forms: List[Dict] = field(default_factory=list)
-    api_routes: List[Dict] = field(default_factory=list)
-    admin_panels: List[Dict] = field(default_factory=list)
-    files: List[Dict] = field(default_factory=list)
-    subdomains: List[Dict] = field(default_factory=list)
-    technologies: List[Dict] = field(default_factory=list)
+    """树状关联模型的扫描结果数据结构"""
+    # 核心：以资产为中心的树状字典
+    assets: Dict[str, Dict] = field(default_factory=dict)
+    
+    # 保留少量无法归属到特定资产的发现
+    orphaned_findings: Dict = field(default_factory=lambda: {
+        "global_technologies": [],  # 全局技术栈信息
+        "cdn_services": [],         # CDN 服务
+        "external_apis": []         # 外部API调用
+    })
+    
+    def add_asset(self, domain: str, asset_type: str = "subdomain", 
+                  protocol: str = "", status: int = 0, title: str = "") -> None:
+        """添加新资产或更新现有资产"""
+        if domain not in self.assets:
+            self.assets[domain] = {
+                "type": asset_type,
+                "protocol": protocol,
+                "status": status,
+                "title": title,
+                "discovery_timestamp": datetime.now().isoformat(),
+                "technologies": [],
+                "endpoints": {},
+                "forms": [],
+                "files": [],
+                "risk_score": 0,
+                "waf_detected": False,
+                "cms_info": {},
+                "database_info": {},
+                "server_info": {}
+            }
+        else:
+            # 更新已存在的资产信息
+            if protocol: self.assets[domain]["protocol"] = protocol
+            if status: self.assets[domain]["status"] = status  
+            if title: self.assets[domain]["title"] = title
+    
+    def add_endpoint(self, domain: str, path: str, endpoint_data: Dict) -> None:
+        """为指定资产添加端点"""
+        self.add_asset(domain)  # 确保资产存在
+        self.assets[domain]["endpoints"][path] = endpoint_data
+    
+    def add_technology(self, domain: str, tech_data: Dict) -> None:
+        """为指定资产添加技术栈信息"""
+        self.add_asset(domain)  # 确保资产存在
+        self.assets[domain]["technologies"].append(tech_data)
+    
+    def add_form(self, domain: str, form_data: Dict) -> None:
+        """为指定资产添加表单"""
+        self.add_asset(domain)  # 确保资产存在
+        self.assets[domain]["forms"].append(form_data)
+    
+    def add_file(self, domain: str, file_data: Dict) -> None:
+        """为指定资产添加敏感文件"""
+        self.add_asset(domain)  # 确保资产存在
+        self.assets[domain]["files"].append(file_data)
+    
+    def calculate_risk_scores(self) -> None:
+        """计算每个资产的风险评分"""
+        for domain, asset in self.assets.items():
+            score = 0
+            
+            # 基础分数
+            if asset["type"] == "main_domain":
+                score += 20
+            elif asset["type"] == "subdomain":
+                score += 10
+                
+            # 端点数量影响
+            endpoint_count = len(asset["endpoints"])
+            score += min(endpoint_count * 5, 30)  # 最多30分
+            
+            # 高风险端点加分
+            for path, endpoint in asset["endpoints"].items():
+                if any(keyword in path.lower() for keyword in ['admin', 'login', 'api', 'graphql', 'upload']):
+                    score += 15
+                if endpoint.get("risk_level") == "high":
+                    score += 20
+                elif endpoint.get("risk_level") == "medium":
+                    score += 10
+            
+            # 技术栈风险
+            for tech in asset["technologies"]:
+                if tech.get("category") == "framework":
+                    score += 5
+                if tech.get("has_vulnerabilities"):
+                    score += 25
+            
+            # 表单数量
+            score += len(asset["forms"]) * 3
+            
+            # 敏感文件
+            score += len(asset["files"]) * 8
+            
+            # WAF检测影响（被保护的资产风险相对较低）
+            if asset["waf_detected"]:
+                score = int(score * 0.8)
+            
+            asset["risk_score"] = min(score, 100)  # 最高100分
+    
+    def get_attack_surface_map(self) -> Dict:
+        """生成攻击面地图"""
+        attack_map = {}
+        
+        for domain, asset in self.assets.items():
+            # 识别攻击路径
+            attack_paths = []
+            
+            # 管理后台路径
+            admin_endpoints = [path for path in asset["endpoints"].keys() 
+                             if any(keyword in path.lower() for keyword in ['admin', 'login', 'dashboard'])]
+            if admin_endpoints:
+                attack_paths.append({
+                    "type": "admin_access",
+                    "endpoints": admin_endpoints,
+                    "risk": "high"
+                })
+            
+            # API端点
+            api_endpoints = [path for path in asset["endpoints"].keys()
+                           if any(keyword in path.lower() for keyword in ['api', 'graphql', 'rest'])]
+            if api_endpoints:
+                attack_paths.append({
+                    "type": "api_access", 
+                    "endpoints": api_endpoints,
+                    "risk": "medium"
+                })
+            
+            # 上传功能
+            upload_endpoints = [path for path in asset["endpoints"].keys()
+                              if 'upload' in path.lower()]
+            if upload_endpoints:
+                attack_paths.append({
+                    "type": "file_upload",
+                    "endpoints": upload_endpoints, 
+                    "risk": "high"
+                })
+            
+            if attack_paths:
+                attack_map[domain] = {
+                    "asset_info": {
+                        "risk_score": asset["risk_score"],
+                        "technologies": [t.get("name", "") for t in asset["technologies"]],
+                        "waf_protected": asset["waf_detected"]
+                    },
+                    "attack_paths": attack_paths
+                }
+        
+        return attack_map
     
     def to_dict(self) -> Dict:
-        """转换为字典格式"""
+        """转换为字典格式 - 新的树状结构"""
         return {
-            "endpoints": self.endpoints,
-            "forms": self.forms,
-            "api_routes": self.api_routes,
-            "admin_panels": self.admin_panels,
-            "files": self.files,
-            "subdomains": self.subdomains,
-            "technologies": self.technologies
+            "assets": self.assets,
+            "orphaned_findings": self.orphaned_findings,
+            "asset_count": len(self.assets),
+            "total_endpoints": sum(len(asset["endpoints"]) for asset in self.assets.values()),
+            "attack_surface_map": self.get_attack_surface_map()
         }
+    
+    # 兼容性方法：为了不破坏现有代码，暂时保留旧的属性访问方式
+    @property
+    def subdomains(self) -> List[Dict]:
+        """兼容性：返回子域名列表"""
+        return [{"domain": domain, **asset} for domain, asset in self.assets.items() 
+                if asset["type"] in ["subdomain", "main_domain"]]
+    
+    @property  
+    def admin_panels(self) -> List[Dict]:
+        """兼容性：返回管理面板列表"""
+        panels = []
+        for domain, asset in self.assets.items():
+            for path, endpoint in asset["endpoints"].items():
+                if any(keyword in path.lower() for keyword in ['admin', 'login', 'dashboard']):
+                    panels.append({
+                        "domain": domain,
+                        "url": f"{asset['protocol']}://{domain}{path}",
+                        "path": path,
+                        **endpoint
+                    })
+        return panels
+    
+    @property
+    def technologies(self) -> List[Dict]:
+        """兼容性：返回技术栈列表"""  
+        techs = []
+        for domain, asset in self.assets.items():
+            for tech in asset["technologies"]:
+                techs.append({"domain": domain, **tech})
+        return techs + self.orphaned_findings["global_technologies"]
 
 class SimpleProxyPool:
     """轻量级代理池 - 直接读取500个IP并轮换"""
@@ -1719,12 +1889,14 @@ class AssetMapper:
                         url = f"{protocol}://{subdomain}"
                         response = await self.safe_request(url, timeout=self.config.subdomain_timeout)
                         if response and response.status < 500:
-                            self.results.subdomains.append({
-                                "domain": subdomain,
-                                "protocol": protocol,
-                                "status": response.status,
-                                "title": await self._extract_title(response)
-                            })
+                            # 🌟 新的树状存储方式
+                            self.results.add_asset(
+                                domain=subdomain,
+                                asset_type="subdomain",
+                                protocol=protocol,
+                                status=response.status,
+                                title=await self._extract_title(response)
+                            )
                             logger.debug(f"存活子域名: {protocol}://{subdomain} ({response.status})")
                     except Exception as e:
                         logger.debug(f"子域名验证失败 {subdomain}: {type(e).__name__}")
@@ -1954,12 +2126,21 @@ class AssetMapper:
             matches = re.findall(pattern, js_content, re.I)
             for match in matches:
                 if len(match) >= 20:  # 过滤短值
-                    self.results.api_routes.append({
-                        "route": f"[CREDENTIAL FOUND: {cred_type}] {match[:30]}...",
+                    # 🌟 新的树状存储方式：从源URL提取域名
+                    domain = self._extract_domain_from_url(source)
+                    if domain:
+                        self.results.add_endpoint(
+                            domain=domain,
+                            path=f"/js_analysis/credential/{cred_type.lower().replace(' ', '_')}",
+                            endpoint_data={
+                                "credential_type": cred_type,
+                                "credential_preview": f"{match[:30]}...",
                         "source": source,
-                        "type": "credential",
-                        "risk_level": "critical"
-                    })
+                                "endpoint_type": "credential_leak",
+                                "risk_level": "critical",
+                                "discovery_method": "js_analysis"
+                            }
+                        )
     
     async def _extract_internal_hosts(self, js_content: str, source: str):
         """提取内部域名和IP"""
@@ -1974,12 +2155,21 @@ class AssetMapper:
         for pattern, host_type in internal_patterns:
             matches = re.findall(pattern, js_content, re.I)
             for match in matches:
-                self.results.api_routes.append({
-                    "route": f"[INTERNAL HOST: {host_type}] {match}",
+                # 🌟 新的树状存储方式：从源URL提取域名
+                domain = self._extract_domain_from_url(source)
+                if domain:
+                    self.results.add_endpoint(
+                        domain=domain,
+                        path=f"/js_analysis/internal_host/{match}",
+                        endpoint_data={
+                            "host_type": host_type,
+                            "internal_host": match,
                     "source": source,
-                    "type": "internal_host",
-                    "risk_level": "high"
-                })
+                            "endpoint_type": "internal_host_leak",
+                            "risk_level": "high",
+                            "discovery_method": "js_analysis"
+                        }
+                    )
     
     async def _extract_api_endpoints(self, js_content: str, source: str):
         """提取API端点 - 智能噪音过滤版"""
@@ -2019,12 +2209,21 @@ class AssetMapper:
                 # 这是有价值的发现
                 self.stats['valuable_findings'] += 1
                 self.noise_stats['valuable_kept'] += 1
-                self.results.api_routes.append({
-                    "route": match,
+                
+                # 🌟 新的树状存储方式：从源URL提取域名
+                domain = self._extract_domain_from_url(source)
+                if domain:
+                    self.results.add_endpoint(
+                        domain=domain,
+                        path=match,
+                        endpoint_data={
                     "source": source,
-                    "type": "api_endpoint",
-                    "filtered": False  # 标记为未被过滤
-                })
+                            "endpoint_type": "api_endpoint",
+                            "risk_level": "medium",
+                            "filtered": False,
+                            "discovery_method": "js_analysis"
+                        }
+                    )
         
         # 日志统计
         if total_found > 0:
@@ -2062,12 +2261,22 @@ class AssetMapper:
                 
                 self.stats['valuable_findings'] += 1
                 self.noise_stats['valuable_kept'] += 1
-                self.results.api_routes.append({
-                    "route": route_content,
+                
+                # 🌟 新的树状存储方式：从源URL提取域名
+                domain = self._extract_domain_from_url(source)
+                if domain:
+                    self.results.add_endpoint(
+                        domain=domain,
+                        path=f"/graphql/{gql_type.lower().replace(' ', '_')}",
+                        endpoint_data={
+                            "graphql_type": gql_type,
+                            "content": route_content,
                     "source": source,
-                    "type": "graphql",
-                    "risk_level": "high" if gql_type in ['GraphQL Introspection', 'IntrospectionQuery'] else "medium"
-                })
+                            "endpoint_type": "graphql",
+                            "risk_level": "high" if gql_type in ['GraphQL Introspection', 'IntrospectionQuery'] else "medium",
+                            "discovery_method": "js_analysis"
+                        }
+                    )
     
     async def _check_source_map(self, js_content: str, js_url: str):
         """检查并下载Source Map"""
@@ -2125,15 +2334,35 @@ class AssetMapper:
         for framework, pattern in version_patterns.items():
             matches = re.findall(pattern, html, re.I)
             for version in matches:
-                self.results.technologies.append({
-                    "type": "framework_version",
+                # 🌟 新的树状存储方式：技术栈关联到主域名
+                self.results.add_technology(
+                    domain=self.target,
+                    tech_data={
+                        "category": "framework_version",
                     "name": f"{framework.title()} v{version}",
-                    "detail": f"版本: {version}"
-                })
+                        "version": version,
+                        "framework": framework.title(),
+                        "has_vulnerabilities": self._check_framework_vulnerabilities(framework, version),
+                        "discovery_method": "html_analysis"
+                    }
+                )
                 
                 # 设置WordPress标志
                 if framework == 'wordpress':
                     self.is_wordpress = True
+    
+    def _check_framework_vulnerabilities(self, framework: str, version: str) -> bool:
+        """检查框架版本是否存在已知漏洞（简化版）"""
+        # 这里可以集成CVE数据库，目前使用简单的版本判断
+        vulnerable_versions = {
+            'wordpress': ['5.7', '5.6', '5.5'],  # 示例
+            'drupal': ['8.9', '9.0', '9.1'],
+            'joomla': ['3.9', '4.0']
+        }
+        
+        if framework.lower() in vulnerable_versions:
+            return version in vulnerable_versions[framework.lower()]
+        return False
     
     async def _detect_cloud_services(self, headers: Dict, html: str):
         """检测云服务"""
@@ -2175,11 +2404,17 @@ class AssetMapper:
             
             if detected:
                 self.detected_cloud_services.append(cloud)
-                self.results.technologies.append({
-                    "type": "cloud_service",
+                # 🌟 新的树状存储方式：云服务技术栈关联到主域名
+                self.results.add_technology(
+                    domain=self.target,
+                    tech_data={
+                        "category": "cloud_service",
                     "name": cloud.upper(),
-                    "detail": f"检测到{cloud}云服务特征"
-                })
+                        "detail": f"检测到{cloud}云服务特征",
+                        "service_type": "cloud_infrastructure",
+                        "discovery_method": "header_content_analysis"
+                    }
+                )
     
     async def _detect_waf_signatures(self, headers: Dict, html: str):
         """检测WAF/安全设备"""
@@ -2221,11 +2456,20 @@ class AssetMapper:
             
             if detected:
                 self.detected_waf.append(waf)
-                self.results.technologies.append({
-                    "type": "security_device",
+                # 🌟 新的树状存储方式：WAF技术栈关联到主域名
+                self.results.add_technology(
+                    domain=self.target,
+                    tech_data={
+                        "category": "security_device",
                     "name": f"{waf.upper()} WAF",
-                    "detail": f"检测到{waf} Web应用防火墙"
-                })
+                        "detail": f"检测到{waf} Web应用防火墙",
+                        "security_type": "web_application_firewall",
+                        "discovery_method": "waf_signature_analysis"
+                    }
+                )
+                # 标记资产受WAF保护
+                self.results.add_asset(self.target)
+                self.results.assets[self.target]["waf_detected"] = True
     
     async def medical_system_detection(self):
         """医疗系统专项检测"""
@@ -2272,23 +2516,38 @@ class AssetMapper:
             
             if response and response.status in [200, 401, 403]:
                 medical_found += 1
-                self.results.admin_panels.append({
+                # 🌟 新的树状存储方式：医疗端点关联到主域名
+                path = f"/medical/{endpoint.split('/')[-1]}"
+                self.results.add_endpoint(
+                    domain=self.target,
+                    path=path,
+                    endpoint_data={
                     "url": url,
                     "status": response.status,
                     "risk_level": "critical" if response.status == 200 else "high",
-                    "type": "medical_endpoint",
-                    "description": "医疗系统API端点"
-                })
+                        "endpoint_type": "medical_system",
+                        "description": "医疗系统API端点",
+                        "discovery_method": "medical_system_scan"
+                    }
+                )
         
         if medical_found > 0:
             self.is_medical = True
             logger.info(f"检测到医疗系统，发现 {medical_found} 个医疗相关端点")
             
-            self.results.technologies.append({
-                "type": "medical_system",
+            # 🌟 新的树状存储方式：医疗系统技术栈关联到主域名  
+            self.results.add_technology(
+                domain=self.target,
+                tech_data={
+                    "category": "medical_system",
                 "name": "医疗信息系统",
-                "detail": f"发现 {medical_found} 个医疗相关端点"
-            })
+                    "detail": f"发现 {medical_found} 个医疗相关端点",
+                    "endpoint_count": medical_found,
+                    "compliance_required": True,
+                    "data_sensitivity": "high",
+                    "discovery_method": "medical_system_scan"
+                }
+            )
     
     def prioritize_findings(self):
         """对发现进行优先级排序"""
@@ -2504,7 +2763,12 @@ class AssetMapper:
             # 检测表单类型
             form_type = self._detect_form_type(form_content.lower())
             
-            self.results.forms.append({
+            # 🌟 新的树状存储方式：从页面URL提取域名
+            domain = self._extract_domain_from_url(url)
+            if domain:
+                self.results.add_form(
+                    domain=domain,
+                    form_data={
                 "url": url,
                 "action": form_url,
                 "method": method,
@@ -2512,8 +2776,11 @@ class AssetMapper:
                 "textareas": len(textareas),
                 "selects": len(selects),
                 "form_type": form_type,
-                "has_file_upload": 'type="file"' in form_content.lower()
-            })
+                        "has_file_upload": 'type="file"' in form_content.lower(),
+                        "risk_level": "high" if form_type in ["login", "admin", "upload"] else "medium",
+                        "discovery_method": "form_analysis"
+                    }
+                )
     
     def _detect_form_type(self, form_content: str) -> str:
         """检测表单类型"""
@@ -2557,32 +2824,58 @@ class AssetMapper:
         """检测特殊功能页面"""
         content_lower = html.lower()
         
+        # 🌟 新的树状存储方式：从页面URL提取域名
+        domain = self._extract_domain_from_url(url)
+        if not domain:
+            return
+        
         # 预约相关页面
         reservation_keywords = ['予約', 'yoyaku', 'reserve', 'booking', 'appointment']
         if any(keyword in content_lower for keyword in reservation_keywords):
-            self.results.endpoints.append({
+            path = urlparse(url).path or "/"
+            self.results.add_endpoint(
+                domain=domain,
+                path=path,
+                endpoint_data={
                 "url": url,
-                "type": "reservation_related",
-                "keywords_found": [kw for kw in reservation_keywords if kw in content_lower]
-            })
+                    "endpoint_type": "reservation_related",
+                    "keywords_found": [kw for kw in reservation_keywords if kw in content_lower],
+                    "risk_level": "low",
+                    "discovery_method": "content_analysis"
+                }
+            )
         
         # 管理后台相关
         admin_keywords = ['admin', 'dashboard', 'management', '管理', 'control']
         if any(keyword in content_lower for keyword in admin_keywords):
-            self.results.endpoints.append({
+            path = urlparse(url).path or "/"
+            self.results.add_endpoint(
+                domain=domain,
+                path=path,
+                endpoint_data={
                 "url": url,
-                "type": "admin_related",
-                "keywords_found": [kw for kw in admin_keywords if kw in content_lower]
-            })
+                    "endpoint_type": "admin_related",
+                    "keywords_found": [kw for kw in admin_keywords if kw in content_lower],
+                    "risk_level": "high",
+                    "discovery_method": "content_analysis"
+                }
+            )
         
         # API相关页面
         api_keywords = ['api', 'graphql', 'swagger', 'openapi']
         if any(keyword in content_lower for keyword in api_keywords):
-            self.results.endpoints.append({
+            path = urlparse(url).path or "/"
+            self.results.add_endpoint(
+                domain=domain,
+                path=path,
+                endpoint_data={
                 "url": url,
-                "type": "api_related", 
-                "keywords_found": [kw for kw in api_keywords if kw in content_lower]
-            })
+                    "endpoint_type": "api_related",
+                    "keywords_found": [kw for kw in api_keywords if kw in content_lower],
+                    "risk_level": "medium",
+                    "discovery_method": "content_analysis"
+                }
+            )
 
     async def find_admin_panels(self):
         """查找管理后台 - 优化版"""
@@ -2603,7 +2896,16 @@ class AssetMapper:
             url = urljoin(base_url, path)
             result = await self.check_path_cached(url)
             if result:
-                self.results.admin_panels.append(result)
+                # 🌟 新的树状存储方式：将管理面板关联到特定域名
+                self.results.add_endpoint(
+                    domain=self.target,
+                    path=path,
+                    endpoint_data={
+                        **result,
+                        "endpoint_type": "admin_panel",
+                        "discovery_method": "path_scan"
+                    }
+                )
         
         # 启动所有扫描任务
         for path in self.jp_paths:
@@ -2973,7 +3275,10 @@ class AssetMapper:
                         
                 logging.warning(f"异常被忽略: {type(e).__name__}: {str(e)}")
     def generate_report(self):
-        """生成扫描报告 - 优化版"""
+        """生成扫描报告 - 树状关联模型版"""
+        # 🌟 首先计算所有资产的风险评分
+        self.results.calculate_risk_scores()
+        
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         report_file = f"asset_report_{self.target}_{timestamp}.json"
         
@@ -3009,25 +3314,52 @@ class AssetMapper:
             logger.error(f"报告生成失败: {type(e).__name__}: {e}")
     
     def _generate_summary(self) -> Dict:
-        """生成扫描摘要"""
+        """生成扫描摘要 - 树状关联模型版"""
+        total_endpoints = sum(len(asset["endpoints"]) for asset in self.results.assets.values())
+        total_forms = sum(len(asset["forms"]) for asset in self.results.assets.values())
+        total_technologies = sum(len(asset["technologies"]) for asset in self.results.assets.values())
+        
+        # 统计高风险资产
+        high_risk_assets = [domain for domain, asset in self.results.assets.items() 
+                          if asset["risk_score"] >= 70]
+        
+        # 统计端点类型
+        endpoint_types = {}
+        admin_endpoints = 0
+        api_endpoints = 0
+        
+        for asset in self.results.assets.values():
+            for endpoint in asset["endpoints"].values():
+                endpoint_type = endpoint.get("endpoint_type", "unknown")
+                endpoint_types[endpoint_type] = endpoint_types.get(endpoint_type, 0) + 1
+                
+                if endpoint_type == "admin_panel":
+                    admin_endpoints += 1
+                elif endpoint_type in ["api_endpoint", "graphql"]:
+                    api_endpoints += 1
+        
         return {
-            "total_subdomains": len(self.results.subdomains),
-            "total_forms": len(self.results.forms),
-            "total_api_routes": len(self.results.api_routes),
-            "total_admin_panels": len(self.results.admin_panels),
-            "total_files": len(self.results.files),
-            "total_technologies": len(self.results.technologies),
+            "total_assets": len(self.results.assets),
+            "total_subdomains": len([a for a in self.results.assets.values() if a["type"] == "subdomain"]),
+            "total_endpoints": total_endpoints,
+            "total_forms": total_forms,
+            "total_technologies": total_technologies,
+            "admin_endpoints": admin_endpoints,
+            "api_endpoints": api_endpoints,
+            "endpoint_types": endpoint_types,
             "form_types": self._count_form_types(),
-            "high_risk_panels": len([p for p in self.results.admin_panels if p.get('risk_level') == 'high']),
-            "reservation_forms": len([f for f in self.results.forms if f.get('form_type') == 'reservation'])
+            "high_risk_assets": len(high_risk_assets),
+            "high_risk_asset_list": high_risk_assets[:5],  # 显示前5个
+            "avg_risk_score": round(sum(asset["risk_score"] for asset in self.results.assets.values()) / max(len(self.results.assets), 1), 2)
         }
     
     def _count_form_types(self) -> Dict[str, int]:
-        """统计表单类型"""
+        """统计表单类型 - 树状关联模型版"""
         form_types = {}
-        for form in self.results.forms:
-            form_type = form.get('form_type', 'unknown')
-            form_types[form_type] = form_types.get(form_type, 0) + 1
+        for asset in self.results.assets.values():
+            for form in asset["forms"]:
+                form_type = form.get('form_type', 'unknown')
+                form_types[form_type] = form_types.get(form_type, 0) + 1
         return form_types
     
     def _identify_high_priority_targets(self) -> Dict:
